@@ -109,7 +109,9 @@ CREATE TABLE IF NOT EXISTS system_settings (
     updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
 
--- 6. Unified View for querying both events seamlessly (if needed)
+-- 6. Replace old single event_records table with Unified View
+DROP TABLE IF EXISTS event_records CASCADE;
+
 CREATE OR REPLACE VIEW event_records AS
 SELECT * FROM garba_groove_records
 UNION ALL
