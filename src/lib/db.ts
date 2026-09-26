@@ -140,18 +140,34 @@ export async function testSupabaseConnection(overrideUrl?: string, overrideKey?:
   }
 }
 
-// Check existing order_ids for deduplication
+// Helper: Determine target table name for an event
+export function getRecordTableName(eventId?: string): string {
+  if (eventId === 'navratri_utsav') return 'navratri_utsav_records';
+  if (eventId === 'garba_groove') return 'garba_groove_records';
+  return 'event_records';
+}
+
+// Check existing order_ids across all event tables for deduplication
 export async function getExistingOrderIds(): Promise<Set<string>> {
   const client = getSupabaseClient();
   if (isUsingSupabase() && client) {
     try {
-      const { data, error } = await client.from('event_records').select('order_id');
-      if (!error && data) {
-        return new Set(data.map((r: { order_id: string }) => r.order_id));
-      }
-      console.warn('Supabase getExistingOrderIds failed, falling back to local store:', error?.message);
+      const ids = new Set<string>();
+
+      // Fetch from both separate tables in parallel
+      const [garbaRes, navratriRes, legacyRes] = await Promise.all([
+        client.from('garba_groove_records').select('order_id'),
+        client.from('navratri_utsav_records').select('order_id'),
+        client.from('event_records').select('order_id'),
+      ]);
+
+      if (garbaRes.data) garbaRes.data.forEach((r: { order_id: string }) => ids.add(r.order_id));
+      if (navratriRes.data) navratriRes.data.forEach((r: { order_id: string }) => ids.add(r.order_id));
+      if (legacyRes.data) legacyRes.data.forEach((r: { order_id: string }) => ids.add(r.order_id));
+
+      return ids;
     } catch (err) {
-      console.warn('Supabase query error:', err);
+      console.warn('Supabase getExistingOrderIds error, falling back to local store:', err);
     }
   }
 
@@ -197,7 +213,35 @@ export async function updateImportBatch(id: string, updates: Partial<ImportBatch
   }
 }
 
-// Insert Event Records with duplicate avoidance
+// Helper: Bulk insert records into a specific table with fallback
+async function bulkInsertToTable(client: SupabaseClient, tableName: string, records: EventRecord[]): Promise<number> {
+  if (records.length === 0) return 0;
+  const chunkSize = 100;
+  let count = 0;
+
+  for (let i = 0; i < records.length; i += chunkSize) {
+    const chunk = records.slice(i, i + chunkSize).map(r => {
+      const { attendance_status, checked_in_at, ...clean } = r;
+      return clean;
+    });
+
+    const { error } = await client.from(tableName).insert(chunk);
+    if (error) {
+      // If separate table fails (e.g. table not created yet), fallback to event_records
+      if (tableName !== 'event_records') {
+        console.warn(`Insert to ${tableName} failed (${error.message}), falling back to event_records`);
+        const { error: fallbackErr } = await client.from('event_records').insert(chunk);
+        if (fallbackErr) throw fallbackErr;
+      } else {
+        throw error;
+      }
+    }
+    count += chunk.length;
+  }
+  return count;
+}
+
+// Insert Event Records into their respective event table with duplicate avoidance
 export async function insertEventRecords(records: EventRecord[]): Promise<{ inserted: number; skipped: number; errors: any[] }> {
   if (records.length === 0) return { inserted: 0, skipped: 0, errors: [] };
 
@@ -212,22 +256,16 @@ export async function insertEventRecords(records: EventRecord[]): Promise<{ inse
   const client = getSupabaseClient();
   if (isUsingSupabase() && client) {
     try {
-      // Batch in chunks of 100 for optimal Supabase performance
-      const chunkSize = 100;
-      let count = 0;
-      for (let i = 0; i < toInsert.length; i += chunkSize) {
-        const chunk = toInsert.slice(i, i + chunkSize).map(r => {
-          const { attendance_status, checked_in_at, ...clean } = r;
-          return clean;
-        });
-        const { error } = await client.from('event_records').insert(chunk);
-        if (error) {
-          console.error('Supabase batch insert error on chunk:', error.message);
-          throw error;
-        }
-        count += chunk.length;
-      }
-      return { inserted: count, skipped, errors: [] };
+      // Group records by target table
+      const garbaRecords = toInsert.filter(r => r.event_id !== 'navratri_utsav');
+      const navratriRecords = toInsert.filter(r => r.event_id === 'navratri_utsav');
+
+      const [garbaCount, navratriCount] = await Promise.all([
+        bulkInsertToTable(client, 'garba_groove_records', garbaRecords),
+        bulkInsertToTable(client, 'navratri_utsav_records', navratriRecords),
+      ]);
+
+      return { inserted: garbaCount + navratriCount, skipped, errors: [] };
     } catch (err) {
       console.warn('Supabase bulk insert failed, storing locally:', err);
     }
@@ -504,8 +542,42 @@ export function computeDivisionStats(records: EventRecord[]): DivisionStats[] {
     });
   }
 
-  // Sort by total passes descending then donation amount
   return result.sort((a, b) => b.totalPasses - a.totalPasses || b.totalDonationAmount - a.totalDonationAmount);
+}
+
+// Fetch all records from Supabase tables dynamically
+async function fetchSupabaseRecords(client: SupabaseClient, eventId?: string): Promise<EventRecord[]> {
+  const records: EventRecord[] = [];
+
+  if (eventId === 'garba_groove') {
+    const { data } = await client.from('garba_groove_records').select('*');
+    if (data && data.length > 0) return data as EventRecord[];
+    // Fallback to event_records view
+    const { data: viewData } = await client.from('event_records').select('*').eq('event_id', 'garba_groove');
+    return (viewData || []) as EventRecord[];
+  }
+
+  if (eventId === 'navratri_utsav') {
+    const { data } = await client.from('navratri_utsav_records').select('*');
+    if (data && data.length > 0) return data as EventRecord[];
+    // Fallback to event_records view
+    const { data: viewData } = await client.from('event_records').select('*').eq('event_id', 'navratri_utsav');
+    return (viewData || []) as EventRecord[];
+  }
+
+  // Event ID is 'all' or unspecified -> fetch from both tables
+  const [garbaRes, navratriRes, legacyRes] = await Promise.all([
+    client.from('garba_groove_records').select('*'),
+    client.from('navratri_utsav_records').select('*'),
+    client.from('event_records').select('*'),
+  ]);
+
+  const recordMap = new Map<string, EventRecord>();
+  if (garbaRes.data) garbaRes.data.forEach((r) => recordMap.set(r.order_id, r as EventRecord));
+  if (navratriRes.data) navratriRes.data.forEach((r) => recordMap.set(r.order_id, r as EventRecord));
+  if (legacyRes.data) legacyRes.data.forEach((r) => { if (!recordMap.has(r.order_id)) recordMap.set(r.order_id, r as EventRecord); });
+
+  return Array.from(recordMap.values());
 }
 
 // Get Dashboard Statistics with Event Scope, Division Breakdown & Day-Wise Analytics
@@ -513,20 +585,16 @@ export async function getDashboardStats(eventId?: string): Promise<DashboardStat
   const client = getSupabaseClient();
   if (isUsingSupabase() && client) {
     try {
-      let query = client.from('event_records').select('*');
       let batchQuery = client.from('import_batches').select('*').order('created_at', { ascending: false });
-
       if (eventId && eventId !== 'all') {
-        query = query.eq('event_id', eventId);
         batchQuery = batchQuery.eq('event_id', eventId);
       }
 
-      const [{ data: recordsData }, { data: latestBatches }] = await Promise.all([
-        query,
+      const [records, { data: latestBatches }] = await Promise.all([
+        fetchSupabaseRecords(client, eventId),
         batchQuery.limit(1),
       ]);
 
-      const records = (recordsData || []) as EventRecord[];
       const passes = records.filter((r) => r.record_type === 'PASS');
       const donations = records.filter((r) => r.record_type === 'DONATION');
 
@@ -601,20 +669,32 @@ export async function getRecords(params: {
   const client = getSupabaseClient();
   if (isUsingSupabase() && client) {
     try {
-      let query = client.from('event_records').select('*', { count: 'exact' });
-      if (type) query = query.eq('record_type', type);
-      if (eventId && eventId !== 'all') query = query.eq('event_id', eventId);
-      if (division && division !== 'all') query = query.eq('divisions', division);
-      if (search && search.trim()) {
-        const s = search.trim();
-        query = query.or(`order_id.ilike.%${s}%,name.ilike.%${s}%,email.ilike.%${s}%,phone.ilike.%${s}%,payment_id.ilike.%${s}%,divisions.ilike.%${s}%,referred_volunteer.ilike.%${s}%`);
-      }
-      query = query.order('created_at', { ascending: false }).range(offset, offset + limit - 1);
+      let records = await fetchSupabaseRecords(client, eventId);
 
-      const { data, count, error } = await query;
-      if (!error && data) {
-        return { records: data as EventRecord[], total: count || data.length };
+      if (type) {
+        records = records.filter((r) => r.record_type === type);
       }
+      if (division && division !== 'all') {
+        records = records.filter((r) => r.divisions === division);
+      }
+      if (search && search.trim()) {
+        const s = search.trim().toLowerCase();
+        records = records.filter(
+          (r) =>
+            r.order_id?.toLowerCase().includes(s) ||
+            r.name?.toLowerCase().includes(s) ||
+            r.email?.toLowerCase().includes(s) ||
+            r.phone?.toLowerCase().includes(s) ||
+            r.payment_id?.toLowerCase().includes(s) ||
+            r.divisions?.toLowerCase().includes(s) ||
+            r.referred_volunteer?.toLowerCase().includes(s)
+        );
+      }
+
+      records.sort((a, b) => new Date(b.created_at || 0).getTime() - new Date(a.created_at || 0).getTime());
+      const total = records.length;
+      const paginated = records.slice(offset, offset + limit);
+      return { records: paginated, total };
     } catch (err) {
       console.warn('Supabase getRecords error, fallback local:', err);
     }
@@ -653,26 +733,19 @@ export async function getRecords(params: {
 export async function getRecordsByOrderIds(orderIds: string[]): Promise<EventRecord[]> {
   if (!orderIds || orderIds.length === 0) return [];
 
-  let results: EventRecord[] = [];
-
   const client = getSupabaseClient();
   if (isUsingSupabase() && client) {
     try {
-      const { data, error } = await client.from('event_records').select('*').in('order_id', orderIds);
-      if (!error && data) {
-        results = data as EventRecord[];
-      }
+      const records = await fetchSupabaseRecords(client);
+      const matched = records.filter((r) => orderIds.includes(r.order_id));
+      if (matched.length > 0) return matched;
     } catch (err) {
       console.warn('Supabase getRecordsByOrderIds error, fallback local:', err);
     }
   }
 
-  if (results.length === 0) {
-    const local = readLocalDb();
-    results = local.records.filter((r) => orderIds.includes(r.order_id));
-  }
-
-  return results;
+  const local = readLocalDb();
+  return local.records.filter((r) => orderIds.includes(r.order_id));
 }
 
 // Update Email Status
@@ -680,7 +753,11 @@ export async function updateRecordEmailStatus(orderId: string, status: 'Pending'
   const client = getSupabaseClient();
   if (isUsingSupabase() && client) {
     try {
-      await client.from('event_records').update({ email_status: status, email_sent_at: sentAt }).eq('order_id', orderId);
+      await Promise.allSettled([
+        client.from('garba_groove_records').update({ email_status: status, email_sent_at: sentAt }).eq('order_id', orderId),
+        client.from('navratri_utsav_records').update({ email_status: status, email_sent_at: sentAt }).eq('order_id', orderId),
+        client.from('event_records').update({ email_status: status, email_sent_at: sentAt }).eq('order_id', orderId),
+      ]);
     } catch (err) {
       console.warn('Supabase updateRecordEmailStatus error:', err);
     }
@@ -720,7 +797,6 @@ export async function getImportBatches(eventId?: string): Promise<ImportBatch[]>
 // Get and Update Settings
 export function getSettings(): SystemSettings {
   const local = readLocalDb();
-  // Sync environment variables into settings if present
   const envSupabaseUrl = process.env.NEXT_PUBLIC_SUPABASE_URL;
   const envSupabaseAnonKey = process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY;
   const envSupabaseServiceKey = process.env.SUPABASE_SERVICE_ROLE_KEY;
@@ -763,27 +839,11 @@ export async function getRecordByCode(code: string): Promise<EventRecord | null>
   const client = getSupabaseClient();
   if (isUsingSupabase() && client) {
     try {
-      // 1. Try order_id match
-      const { data: byOrder, error: errOrder } = await client
-        .from('event_records')
-        .select('*')
-        .eq('order_id', trimmed)
-        .limit(1);
-
-      if (!errOrder && byOrder && byOrder.length > 0) {
-        return byOrder[0] as EventRecord;
-      }
-
-      // 2. Try code match
-      const { data: byCode, error: errCode } = await client
-        .from('event_records')
-        .select('*')
-        .eq('code', trimmed)
-        .limit(1);
-
-      if (!errCode && byCode && byCode.length > 0) {
-        return byCode[0] as EventRecord;
-      }
+      const records = await fetchSupabaseRecords(client);
+      const found = records.find(
+        (r) => r.order_id?.trim() === trimmed || r.code?.trim() === trimmed
+      );
+      if (found) return found;
     } catch (err) {
       console.warn('Supabase getRecordByCode error, fallback local:', err);
     }
@@ -811,40 +871,33 @@ export async function updateAttendanceStatus(
   const client = getSupabaseClient();
   if (isUsingSupabase() && client) {
     try {
-      let targetId: string | null = null;
+      const records = await fetchSupabaseRecords(client);
+      const target = records.find(
+        (r) => r.order_id?.trim() === trimmed || r.code?.trim() === trimmed
+      );
 
-      // Find by order_id
-      const { data: byOrder } = await client
-        .from('event_records')
-        .select('id')
-        .eq('order_id', trimmed)
-        .limit(1);
+      if (target) {
+        const targetTable = getRecordTableName(target.event_id);
 
-      if (byOrder && byOrder.length > 0) {
-        targetId = byOrder[0].id;
-      } else {
-        // Find by code
-        const { data: byCode } = await client
-          .from('event_records')
-          .select('id')
-          .eq('code', trimmed)
-          .limit(1);
-
-        if (byCode && byCode.length > 0) {
-          targetId = byCode[0].id;
-        }
-      }
-
-      if (targetId) {
         const { data, error } = await client
+          .from(targetTable)
+          .update({ attendance_status: status, checked_in_at: checkedInAt })
+          .eq('id', target.id)
+          .select();
+
+        if (!error && data && data.length > 0) {
+          return { success: true, record: data[0] as EventRecord };
+        }
+
+        // Fallback update on event_records
+        const { data: fallbackData, error: fallbackErr } = await client
           .from('event_records')
           .update({ attendance_status: status, checked_in_at: checkedInAt })
-          .eq('id', targetId)
-          .select()
-          .single();
+          .eq('id', target.id)
+          .select();
 
-        if (!error && data) {
-          return { success: true, record: data as EventRecord };
+        if (!fallbackErr && fallbackData && fallbackData.length > 0) {
+          return { success: true, record: fallbackData[0] as EventRecord };
         }
       }
     } catch (err: any) {
@@ -870,3 +923,42 @@ export async function updateAttendanceStatus(
   return { success: false, error: `Pass record for code "${trimmed}" not found in database.` };
 }
 
+// Clear all database records (Supabase & Local JSON)
+export async function clearDatabase(): Promise<{ success: boolean; message: string }> {
+  const client = getSupabaseClient();
+  let supabaseCleared = false;
+  let supabaseMsg = '';
+
+  if (isUsingSupabase() && client) {
+    try {
+      await Promise.allSettled([
+        client.from('garba_groove_records').delete().neq('id', '00000000-0000-0000-0000-000000000000'),
+        client.from('navratri_utsav_records').delete().neq('id', '00000000-0000-0000-0000-000000000000'),
+        client.from('event_records').delete().neq('id', '00000000-0000-0000-0000-000000000000'),
+        client.from('import_batches').delete().neq('id', '00000000-0000-0000-0000-000000000000'),
+        client.from('import_errors').delete().neq('id', '00000000-0000-0000-0000-000000000000'),
+      ]);
+      supabaseCleared = true;
+      supabaseMsg = 'Supabase tables (garba_groove_records, navratri_utsav_records, import_batches, import_errors) cleared successfully.';
+    } catch (err: any) {
+      console.error('Failed to clear Supabase:', err);
+      supabaseMsg = `Supabase clear notice: ${err.message}`;
+    }
+  }
+
+  // Clear local JSON database
+  const emptyDb: LocalDatabase = {
+    batches: [],
+    records: [],
+    errors: [],
+    settings: getSettings(),
+  };
+  writeLocalDb(emptyDb);
+
+  return {
+    success: true,
+    message: supabaseCleared
+      ? `Database cleared successfully! (${supabaseMsg})`
+      : 'Local database cleared successfully.',
+  };
+}
