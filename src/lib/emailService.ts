@@ -88,7 +88,15 @@ export function generatePassEmailHTML(record: EventRecord): string {
 
   const codeValue = record.order_id || record.code || '';
   const encodedCode = encodeURIComponent(codeValue);
-  const verifyUrl = `https://sc-dandiya-2026.vercel.app/verify?code=${encodedCode}`;
+
+  const baseUrl = (
+    process.env.NEXT_PUBLIC_APP_URL ||
+    (process.env.VERCEL_PROJECT_PRODUCTION_URL ? `https://${process.env.VERCEL_PROJECT_PRODUCTION_URL}` : '') ||
+    (process.env.VERCEL_URL ? `https://${process.env.VERCEL_URL}` : '') ||
+    'https://street-cause-dandiya-2026.vercel.app'
+  ).replace(/\/+$/, '');
+
+  const verifyUrl = `${baseUrl}/verify?code=${encodedCode}`;
   const qrCodeImgUrl = `https://api.qrserver.com/v1/create-qr-code/?size=235x235&data=${encodeURIComponent(verifyUrl)}`;
 
   const attendeeName = record.name || '';
