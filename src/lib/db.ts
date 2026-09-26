@@ -763,14 +763,26 @@ export async function getRecordByCode(code: string): Promise<EventRecord | null>
   const client = getSupabaseClient();
   if (isUsingSupabase() && client) {
     try {
-      const { data, error } = await client
+      // 1. Try order_id match
+      const { data: byOrder, error: errOrder } = await client
         .from('event_records')
         .select('*')
-        .or(`code.eq.${trimmed},order_id.eq.${trimmed}`)
+        .eq('order_id', trimmed)
         .limit(1);
 
-      if (!error && data && data.length > 0) {
-        return data[0] as EventRecord;
+      if (!errOrder && byOrder && byOrder.length > 0) {
+        return byOrder[0] as EventRecord;
+      }
+
+      // 2. Try code match
+      const { data: byCode, error: errCode } = await client
+        .from('event_records')
+        .select('*')
+        .eq('code', trimmed)
+        .limit(1);
+
+      if (!errCode && byCode && byCode.length > 0) {
+        return byCode[0] as EventRecord;
       }
     } catch (err) {
       console.warn('Supabase getRecordByCode error, fallback local:', err);
@@ -799,14 +811,31 @@ export async function updateAttendanceStatus(
   const client = getSupabaseClient();
   if (isUsingSupabase() && client) {
     try {
-      const { data: existing } = await client
+      let targetId: string | null = null;
+
+      // Find by order_id
+      const { data: byOrder } = await client
         .from('event_records')
         .select('id')
-        .or(`code.eq.${trimmed},order_id.eq.${trimmed}`)
+        .eq('order_id', trimmed)
         .limit(1);
 
-      if (existing && existing.length > 0) {
-        const targetId = existing[0].id;
+      if (byOrder && byOrder.length > 0) {
+        targetId = byOrder[0].id;
+      } else {
+        // Find by code
+        const { data: byCode } = await client
+          .from('event_records')
+          .select('id')
+          .eq('code', trimmed)
+          .limit(1);
+
+        if (byCode && byCode.length > 0) {
+          targetId = byCode[0].id;
+        }
+      }
+
+      if (targetId) {
         const { data, error } = await client
           .from('event_records')
           .update({ attendance_status: status, checked_in_at: checkedInAt })
@@ -838,6 +867,6 @@ export async function updateAttendanceStatus(
     return { success: true, record: local.records[idx] };
   }
 
-  return { success: false, error: 'Pass record not found' };
+  return { success: false, error: `Pass record for code "${trimmed}" not found in database.` };
 }
 

@@ -241,6 +241,19 @@ function VerifyContent() {
           </div>
         )}
 
+        {/* Pass Record Not Found View */}
+        {!loading && !record && code && error && (
+          <div className="bg-slate-900 border border-slate-800 rounded-2xl p-12 text-center">
+            <div className="w-12 h-12 bg-rose-500/10 border border-rose-500/30 rounded-2xl flex items-center justify-center mx-auto mb-4 text-rose-400 font-bold text-xl">
+              ⚠️
+            </div>
+            <p className="text-white font-bold text-lg mb-1">Pass Record Not Found</p>
+            <p className="text-slate-400 text-xs max-w-md mx-auto">
+              No attendee pass matching order code <code className="text-amber-400 font-mono font-bold">{code}</code> exists in the database. Please check the order ID or upload your Razorpay Excel export batch in the admin dashboard.
+            </p>
+          </div>
+        )}
+
         {/* Pass Details View */}
         {!loading && record && (
           <div className="bg-slate-900 border border-slate-800 rounded-2xl overflow-hidden shadow-2xl">
