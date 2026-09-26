@@ -249,8 +249,32 @@ function VerifyContent() {
             </div>
             <p className="text-white font-bold text-lg mb-1">Pass Record Not Found</p>
             <p className="text-slate-400 text-xs max-w-md mx-auto">
-              No attendee pass matching order code <code className="text-amber-400 font-mono font-bold">{code}</code> exists in the database. Please check the order ID or upload your Razorpay Excel export batch in the admin dashboard.
+              No attendee pass matching order code <code className="text-amber-400 font-mono font-bold">{code}</code> exists in the database. Please upload your Razorpay Excel export batch in the dashboard or click below to insert a test pass.
             </p>
+            <div className="mt-6">
+              <button
+                onClick={async () => {
+                  try {
+                    setLoading(true);
+                    const res = await fetch(`/api/seed-test?code=${encodeURIComponent(code)}`);
+                    const data = await res.json();
+                    if (data.success) {
+                      setActionSuccess(`Created test pass "${code}" in Supabase database!`);
+                      fetchPassRecord();
+                    } else {
+                      setError(data.error || 'Failed to create test record');
+                    }
+                  } catch (e: any) {
+                    setError(e.message);
+                  } finally {
+                    setLoading(false);
+                  }
+                }}
+                className="px-5 py-2.5 bg-gradient-to-r from-amber-500 to-amber-600 hover:from-amber-400 hover:to-amber-500 text-slate-950 font-bold text-xs rounded-xl shadow-lg transition"
+              >
+                ⚡ Insert Test Pass &quot;{code}&quot; into Supabase Database
+              </button>
+            </div>
           </div>
         )}
 
