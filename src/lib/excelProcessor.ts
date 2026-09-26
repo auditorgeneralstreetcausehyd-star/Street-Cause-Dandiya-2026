@@ -40,17 +40,28 @@ export function parseRawRows(buffer: Buffer): Record<string, unknown>[] {
   return XLSX.utils.sheet_to_json<Record<string, unknown>>(sheet, { defval: '' });
 }
 
+// Helper: Event Classifier from Payment Page Title (Column B: "SC HYD GARBA GROOVE" vs "SC HYD NAVRATRI UTSAV")
+export function classifyEventFromTitle(paymentPageTitle: string): 'garba_groove' | 'navratri_utsav' | null {
+  if (!paymentPageTitle) return null;
+  const normalized = paymentPageTitle.toLowerCase().trim().replace(/[\s_-]+/g, ' ');
+  if (normalized.includes('garba groove') || normalized.includes('garba')) {
+    return 'garba_groove';
+  }
+  if (normalized.includes('navratri utsav') || normalized.includes('navratri') || normalized.includes('utsav') || normalized.includes('nirvana')) {
+    return 'navratri_utsav';
+  }
+  return null;
+}
+
 // Stage 1: Analyze Excel File
 export async function analyzeExcelBuffer(
   buffer: Buffer,
   fileName: string,
-  eventId: string = 'garba_groove'
+  targetEventId: string = 'garba_groove'
 ): Promise<PreImportAnalysis> {
   const rows = parseRawRows(buffer);
   const settings = getSettings();
   const existingOrderIds = await getExistingOrderIds();
-
-  const eventName = eventId === 'navratri_utsav' ? 'Navratri Utsav 2026' : 'Garba Groove 2026';
 
   const acceptedStatuses = new Set(
     (settings.acceptedPaymentStatuses || ['captured', 'paid', 'success', 'successful', 'completed']).map((s) =>
@@ -81,6 +92,8 @@ export async function analyzeExcelBuffer(
   let duplicatesInFile = 0;
   let existingDuplicatesCount = 0;
 
+  const detectedEvents = new Set<'garba_groove' | 'navratri_utsav'>();
+
   const previewPasses: Partial<EventRecord>[] = [];
   const previewDonations: Partial<EventRecord>[] = [];
   const previewDuplicates: { order_id: string; name?: string; item_name?: string }[] = [];
@@ -89,6 +102,7 @@ export async function analyzeExcelBuffer(
     const raw = rows[i];
     const status = extractField(raw, ['payment status', 'status', 'payment_status']).toLowerCase();
     const orderId = extractField(raw, ['order_id', 'order id', 'orderid']);
+    const paymentPageTitle = extractField(raw, ['payment page title', 'payment_page_title', 'title']);
     const itemName = extractField(raw, ['item name', 'item_name', 'item', 'description', 'title']);
     const rawQty = extractField(raw, ['item quantity', 'quantity', 'item_quantity', 'qty', 'no of passes', 'number of passes']);
     const rawItemAmt = extractField(raw, ['item payment amount', 'item_payment_amount', 'item amount', 'amount', 'item_amount']);
@@ -125,6 +139,18 @@ export async function analyzeExcelBuffer(
       continue;
     }
 
+    // Validate Event Classification from Column B (Payment Page Title)
+    const detectedEvent = classifyEventFromTitle(paymentPageTitle);
+    if (detectedEvent) {
+      detectedEvents.add(detectedEvent);
+    } else if (paymentPageTitle) {
+      warnings.push(`Row ${i + 2} (${orderId}): Payment Page Title "${paymentPageTitle}" could not be auto-classified into an event.`);
+    }
+
+    if (targetEventId !== 'all' && detectedEvent && detectedEvent !== targetEventId) {
+      warnings.push(`Row ${i + 2} (${orderId}): Payment Page Title indicates event "${detectedEvent === 'navratri_utsav' ? 'Navratri Nirvana' : 'Garba Groove'}", but target event is "${targetEventId}".`);
+    }
+
     // Duplicate Check
     let isDup = false;
     if (fileOrderIds.has(orderId)) {
@@ -146,7 +172,7 @@ export async function analyzeExcelBuffer(
       continue;
     }
 
-    // Classify
+    // Classify Pass vs Donation
     const lowerItem = itemName.toLowerCase();
     const isPass = passKeywords.some((k) => lowerItem.includes(k));
     const isDonation = donationKeywords.some((k) => lowerItem.includes(k));
@@ -165,6 +191,7 @@ export async function analyzeExcelBuffer(
       if (previewPasses.length < 5) {
         previewPasses.push({
           order_id: orderId,
+          code: orderId,
           name,
           email,
           item_name: itemName,
@@ -179,6 +206,7 @@ export async function analyzeExcelBuffer(
       if (previewDonations.length < 5) {
         previewDonations.push({
           order_id: orderId,
+          code: orderId,
           name,
           email,
           item_name: itemName,
@@ -189,18 +217,27 @@ export async function analyzeExcelBuffer(
       }
     } else {
       unclassifiedRowsCount++;
-      warnings.push(`Row ${i + 2} (${orderId}): Item name "${itemName}" could not be classified. Review required.`);
+      warnings.push(`Row ${i + 2} (${orderId}): Item name "${itemName}" could not be classified.`);
     }
   }
 
+  // Determine final batch event ID
+  let finalEventId = targetEventId;
+  if (detectedEvents.size === 1) {
+    finalEventId = Array.from(detectedEvents)[0];
+  } else if (detectedEvents.size > 1 && targetEventId !== 'all') {
+    warnings.unshift(`WARNING: Uploaded file contains mixed records for both Garba Groove and Navratri Nirvana. Records will be assigned per row.`);
+  }
+
+  const finalEventName = finalEventId === 'navratri_utsav' ? 'Navratri Nirvana 2026' : 'Garba Groove 2026';
   const totalDuplicatesToSkip = duplicatesInFile + existingDuplicatesCount;
   const newRecordsToImport = passTransactions + donationTransactions;
 
   return {
     fileName,
     fileSizeBytes: buffer.length,
-    eventId,
-    eventName,
+    eventId: finalEventId,
+    eventName: finalEventName,
     totalRows: rows.length,
     capturedRows,
     ignoredRows,
@@ -215,7 +252,7 @@ export async function analyzeExcelBuffer(
     totalDuplicatesToSkip,
     newRecordsToImport,
     unclassifiedRowsCount,
-    warnings: warnings.slice(0, 15), // Top 15 warnings
+    warnings: warnings.slice(0, 15),
     previewPasses,
     previewDonations,
     previewDuplicates,
@@ -226,14 +263,15 @@ export async function analyzeExcelBuffer(
 export async function processAndImportExcel(
   buffer: Buffer,
   fileName: string,
-  eventId: string = 'garba_groove'
+  targetEventId: string = 'garba_groove'
 ): Promise<{ batch: ImportBatch; syncResult: { success: boolean; message: string; rowsSynced: number } }> {
-  const analysis = await analyzeExcelBuffer(buffer, fileName, eventId);
+  const analysis = await analyzeExcelBuffer(buffer, fileName, targetEventId);
   const rows = parseRawRows(buffer);
   const settings = getSettings();
   const existingOrderIds = await getExistingOrderIds();
 
-  const eventName = eventId === 'navratri_utsav' ? 'Navratri Utsav 2026' : 'Garba Groove 2026';
+  const batchEventId = analysis.eventId || targetEventId;
+  const batchEventName = batchEventId === 'navratri_utsav' ? 'Navratri Nirvana 2026' : 'Garba Groove 2026';
 
   const acceptedStatuses = new Set(
     (settings.acceptedPaymentStatuses || ['captured', 'paid', 'success', 'successful', 'completed']).map((s) =>
@@ -257,8 +295,8 @@ export async function processAndImportExcel(
     id: batchId,
     file_name: fileName,
     file_size: buffer.length,
-    event_id: eventId,
-    event_name: eventName,
+    event_id: batchEventId,
+    event_name: batchEventName,
     total_rows: analysis.totalRows,
     captured_rows: analysis.capturedRows,
     pass_transactions: analysis.passTransactions,
@@ -280,6 +318,7 @@ export async function processAndImportExcel(
     const raw = rows[i];
     const status = extractField(raw, ['payment status', 'status', 'payment_status']).toLowerCase();
     const orderId = extractField(raw, ['order_id', 'order id', 'orderid']);
+    const paymentPageTitle = extractField(raw, ['payment page title', 'payment_page_title', 'title']);
     const itemName = extractField(raw, ['item name', 'item_name', 'item', 'description', 'title']);
     const rawQty = extractField(raw, ['item quantity', 'quantity', 'item_quantity', 'qty', 'no of passes']);
     const rawItemAmt = extractField(raw, ['item payment amount', 'item_payment_amount', 'item amount', 'amount', 'item_amount']);
@@ -299,7 +338,7 @@ export async function processAndImportExcel(
     const isDonation = donationKeywords.some((k) => lowerItem.includes(k));
 
     if (!isPass && !isDonation) {
-      continue; // Unclassified items skipped
+      continue;
     }
 
     const qty = parseInt(rawQty, 10);
@@ -309,14 +348,19 @@ export async function processAndImportExcel(
 
     const recordType: RecordType = isPass ? 'PASS' : 'DONATION';
 
+    // Per-row event classification validation
+    const rowDetectedEvent = classifyEventFromTitle(paymentPageTitle) || batchEventId;
+    const rowEventName = rowDetectedEvent === 'navratri_utsav' ? 'Navratri Nirvana 2026' : 'Garba Groove 2026';
+
     const record: EventRecord = {
       id: `rec_${Date.now()}_${Math.random().toString(36).substring(2, 7)}`,
       order_id: orderId,
-      event_id: eventId,
-      event_name: eventName,
+      code: orderId, // Strictly enforce code === order_id
+      event_id: rowDetectedEvent,
+      event_name: rowEventName,
       record_type: recordType,
       payment_page_id: extractField(raw, ['payment page id', 'payment_page_id']),
-      payment_page_title: extractField(raw, ['payment page title', 'payment_page_title']),
+      payment_page_title: paymentPageTitle,
       payment_date: extractField(raw, ['payment date', 'payment_date', 'date']),
       item_name: itemName,
       item_amount: parseFloat(extractField(raw, ['item amount', 'item_amount'])) || itemAmt,
@@ -333,37 +377,37 @@ export async function processAndImportExcel(
       divisions: extractField(raw, ['divisions', 'division']),
       l2: extractField(raw, ['l2']),
       referred_volunteer: extractField(raw, ['reffered_volunteer', 'referred_volunteer', 'volunteer', 'ref volunteer']),
-      code: extractField(raw, ['code']),
       source_file: fileName,
       import_batch_id: batchId,
       email_status: 'Pending',
       email_sent_at: null,
+      attendance_status: 'PENDING',
+      checked_in_at: null,
       created_at: now,
     };
 
     recordsToInsert.push(record);
   }
 
-  // Insert into Primary Database (Supabase / Local)
+  // Insert into Primary Database (Supabase)
   await insertEventRecords(recordsToInsert);
 
-  // Update batch status to SYNCING
-  await updateImportBatch(batchId, { status: 'SYNCING' });
-
-  // Sync to Google Sheets (Downstream Zapier layer)
-  const syncResult = await syncToGoogleSheets(initialBatch, recordsToInsert);
-
   // Mark Batch as COMPLETED
-  const finalStatus = syncResult.success ? 'COMPLETED' : 'COMPLETED'; // Database is preserved even if sheets had error
   await updateImportBatch(batchId, {
-    status: finalStatus,
-    error_message: syncResult.success ? null : syncResult.message,
+    status: 'COMPLETED',
+    error_message: null,
   });
 
   const completedBatch: ImportBatch = {
     ...initialBatch,
-    status: finalStatus,
-    error_message: syncResult.success ? null : syncResult.message,
+    status: 'COMPLETED',
+    error_message: null,
+  };
+
+  const syncResult = {
+    success: true,
+    message: `Successfully imported ${recordsToInsert.length} records into Supabase for ${batchEventName}.`,
+    rowsSynced: recordsToInsert.length,
   };
 
   return { batch: completedBatch, syncResult };

@@ -20,6 +20,9 @@ const DEFAULT_SETTINGS: SystemSettings = {
   acceptedPaymentStatuses: ['captured', 'paid', 'success', 'successful', 'completed'],
   passKeywords: ['pass', 'ticket', 'entry', 'single', 'couple', 'vip', 'garba', 'dandiya'],
   donationKeywords: ['donation', 'donate', 'daan', 'seva', 'contribut', 'sponsorship', 'support'],
+  garbaGrooveSpreadsheetId: '',
+  navratriUtsavSpreadsheetId: '',
+  navratriPassBgUrl: 'https://res.cloudinary.com/dhrj3rpg8/image/upload/v1789971984/EVENT_PASS.png',
 };
 
 // Local database file path
@@ -213,7 +216,10 @@ export async function insertEventRecords(records: EventRecord[]): Promise<{ inse
       const chunkSize = 100;
       let count = 0;
       for (let i = 0; i < toInsert.length; i += chunkSize) {
-        const chunk = toInsert.slice(i, i + chunkSize);
+        const chunk = toInsert.slice(i, i + chunkSize).map(r => {
+          const { attendance_status, checked_in_at, ...clean } = r;
+          return clean;
+        });
         const { error } = await client.from('event_records').insert(chunk);
         if (error) {
           console.error('Supabase batch insert error on chunk:', error.message);
@@ -643,28 +649,79 @@ export async function getRecords(params: {
   return { records: paginated, total };
 }
 
+export const TEST_GOGANA_RECORD: EventRecord = {
+  id: 'rec_test_gogana_fast',
+  order_id: 'order_GoganaDhanushFast',
+  event_id: 'garba_groove',
+  event_name: 'Garba Groove 2026',
+  record_type: 'PASS',
+  payment_page_id: 'pl_GarbaGroove2026',
+  payment_page_title: 'SC HYD GARBA GROOVE',
+  payment_date: '26/09/2026 10:30:00',
+  item_name: 'Dandiya pass',
+  item_amount: 500,
+  item_quantity: 1,
+  item_payment_amount: 500,
+  total_payment_amount: 500,
+  currency: 'INR',
+  payment_status: 'captured',
+  payment_id: 'pay_TestGoganaFast',
+  email: 'goganadhanush@gmail.com',
+  phone: '+919876543210',
+  name: 'Dhanush Gogana',
+  pan_number: '',
+  divisions: 'CMRCET',
+  l2: 'AKSHARA',
+  referred_volunteer: 'Dhanush',
+  code: 'SC-GARBA-D101',
+  source_file: 'manual_test.xlsx',
+  import_batch_id: 'batch_test_101',
+  email_status: 'Pending',
+  email_sent_at: null,
+  attendance_status: 'PENDING',
+  checked_in_at: null,
+  created_at: new Date().toISOString(),
+};
+
 // Fetch specific records by their order_ids
 export async function getRecordsByOrderIds(orderIds: string[]): Promise<EventRecord[]> {
   if (!orderIds || orderIds.length === 0) return [];
+
+  let results: EventRecord[] = [];
 
   const client = getSupabaseClient();
   if (isUsingSupabase() && client) {
     try {
       const { data, error } = await client.from('event_records').select('*').in('order_id', orderIds);
       if (!error && data) {
-        return data as EventRecord[];
+        results = data as EventRecord[];
       }
     } catch (err) {
       console.warn('Supabase getRecordsByOrderIds error, fallback local:', err);
     }
   }
 
-  const local = readLocalDb();
-  return local.records.filter((r) => orderIds.includes(r.order_id));
+  if (results.length === 0) {
+    const local = readLocalDb();
+    results = local.records.filter((r) => orderIds.includes(r.order_id));
+  }
+
+  // Include test record if requested and not found in DB
+  if (orderIds.includes(TEST_GOGANA_RECORD.order_id) && !results.some((r) => r.order_id === TEST_GOGANA_RECORD.order_id)) {
+    results.push(TEST_GOGANA_RECORD);
+  }
+
+  return results;
 }
 
 // Update Email Status
 export async function updateRecordEmailStatus(orderId: string, status: 'Pending' | 'Sent' | 'Failed', sentAt: string | null = null): Promise<void> {
+  if (orderId === TEST_GOGANA_RECORD.order_id) {
+    TEST_GOGANA_RECORD.email_status = status;
+    TEST_GOGANA_RECORD.email_sent_at = sentAt;
+    return;
+  }
+
   const client = getSupabaseClient();
   if (isUsingSupabase() && client) {
     try {
@@ -713,6 +770,9 @@ export function getSettings(): SystemSettings {
   const envSupabaseAnonKey = process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY;
   const envSupabaseServiceKey = process.env.SUPABASE_SERVICE_ROLE_KEY;
   const envGoogleSpreadsheetId = process.env.GOOGLE_SPREADSHEET_ID;
+  const envGarbaGrooveSpreadsheetId = process.env.GARBA_GROOVE_SPREADSHEET_ID;
+  const envNavratriUtsavSpreadsheetId = process.env.NAVRATRI_UTSAV_SPREADSHEET_ID;
+  const envNavratriPassBgUrl = process.env.NAVRATRI_PASS_BG_URL;
   const envGoogleServiceAccountEmail = process.env.GOOGLE_SERVICE_ACCOUNT_EMAIL;
   const envGooglePrivateKey = process.env.GOOGLE_PRIVATE_KEY;
   const envGoogleSheetsMode = process.env.GOOGLE_SHEETS_MODE as 'mock' | 'live' | undefined;
@@ -724,6 +784,9 @@ export function getSettings(): SystemSettings {
     supabaseAnonKey: envSupabaseAnonKey || local.settings?.supabaseAnonKey,
     supabaseServiceKey: envSupabaseServiceKey || local.settings?.supabaseServiceKey,
     googleSpreadsheetId: envGoogleSpreadsheetId || local.settings?.googleSpreadsheetId,
+    garbaGrooveSpreadsheetId: envGarbaGrooveSpreadsheetId || local.settings?.garbaGrooveSpreadsheetId,
+    navratriUtsavSpreadsheetId: envNavratriUtsavSpreadsheetId || local.settings?.navratriUtsavSpreadsheetId,
+    navratriPassBgUrl: envNavratriPassBgUrl || local.settings?.navratriPassBgUrl,
     googleServiceAccountEmail: envGoogleServiceAccountEmail || local.settings?.googleServiceAccountEmail,
     googlePrivateKey: envGooglePrivateKey || local.settings?.googlePrivateKey,
     googleSheetsMode: envGoogleSheetsMode || local.settings?.googleSheetsMode || 'mock',
@@ -736,3 +799,100 @@ export function saveSettings(settings: Partial<SystemSettings>): SystemSettings 
   writeLocalDb(local);
   return local.settings;
 }
+
+// Get single record by code or order_id
+export async function getRecordByCode(code: string): Promise<EventRecord | null> {
+  if (!code || !code.trim()) return null;
+  const trimmed = code.trim();
+
+  if (trimmed === TEST_GOGANA_RECORD.code || trimmed === TEST_GOGANA_RECORD.order_id) {
+    return TEST_GOGANA_RECORD;
+  }
+
+  const client = getSupabaseClient();
+  if (isUsingSupabase() && client) {
+    try {
+      const { data, error } = await client
+        .from('event_records')
+        .select('*')
+        .or(`code.eq.${trimmed},order_id.eq.${trimmed}`)
+        .limit(1);
+
+      if (!error && data && data.length > 0) {
+        return data[0] as EventRecord;
+      }
+    } catch (err) {
+      console.warn('Supabase getRecordByCode error, fallback local:', err);
+    }
+  }
+
+  const local = readLocalDb();
+  const found = local.records.find(
+    (r) => r.code?.trim() === trimmed || r.order_id?.trim() === trimmed
+  );
+  return found || null;
+}
+
+// Update attendance status ('PENDING' | 'PRESENT' | 'CANCELLED')
+export async function updateAttendanceStatus(
+  code: string,
+  status: 'PENDING' | 'PRESENT' | 'CANCELLED'
+): Promise<{ success: boolean; record?: EventRecord; error?: string }> {
+  if (!code || !code.trim()) {
+    return { success: false, error: 'Pass code or Order ID is required' };
+  }
+
+  const trimmed = code.trim();
+  const checkedInAt = status === 'PRESENT' ? new Date().toISOString() : null;
+
+  if (trimmed === TEST_GOGANA_RECORD.code || trimmed === TEST_GOGANA_RECORD.order_id) {
+    TEST_GOGANA_RECORD.attendance_status = status;
+    TEST_GOGANA_RECORD.checked_in_at = checkedInAt;
+    return { success: true, record: TEST_GOGANA_RECORD };
+  }
+
+  const client = getSupabaseClient();
+  if (isUsingSupabase() && client) {
+    try {
+      const { data: existing } = await client
+        .from('event_records')
+        .select('id')
+        .or(`code.eq.${trimmed},order_id.eq.${trimmed}`)
+        .limit(1);
+
+      if (existing && existing.length > 0) {
+        const targetId = existing[0].id;
+        const { data, error } = await client
+          .from('event_records')
+          .update({ attendance_status: status, checked_in_at: checkedInAt })
+          .eq('id', targetId)
+          .select()
+          .single();
+
+        if (!error && data) {
+          return { success: true, record: data as EventRecord };
+        }
+      }
+    } catch (err: any) {
+      console.warn('Supabase updateAttendanceStatus error, updating locally:', err?.message);
+    }
+  }
+
+  const local = readLocalDb();
+  const idx = local.records.findIndex(
+    (r) => r.code?.trim() === trimmed || r.order_id?.trim() === trimmed
+  );
+
+  if (idx !== -1) {
+    local.records[idx] = {
+      ...local.records[idx],
+      attendance_status: status,
+      checked_in_at: checkedInAt,
+    };
+    writeLocalDb(local);
+    return { success: true, record: local.records[idx] };
+  }
+
+  return { success: false, error: 'Pass record not found' };
+}
+

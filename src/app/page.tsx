@@ -38,7 +38,9 @@ import {
   BarChart3,
   Mail,
   Send,
-  Filter
+  Filter,
+  Link as LinkIcon,
+  Save
 } from 'lucide-react';
 import { DashboardStats, ImportBatch, EventRecord, PreImportAnalysis, EventId, DayWiseStat, VolunteerStat, DivisionStats } from '@/lib/types';
 
@@ -684,6 +686,18 @@ export default function Home() {
 
           {/* Right Actions: Backend Status & Refresh */}
           <div className="flex items-center gap-2.5">
+            {/* Admin Verification Portal Button */}
+            <a
+              href="/verify"
+              target="_blank"
+              rel="noopener noreferrer"
+              className="flex items-center gap-1.5 px-3 py-1.5 rounded-xl bg-gradient-to-r from-amber-500 to-rose-600 hover:from-amber-600 hover:to-rose-700 text-white font-bold text-xs shadow-md shadow-amber-500/20 transition"
+              title="Open Organizer QR Verification Login"
+            >
+              <Shield className="w-3.5 h-3.5 text-white" />
+              <span>Admin Verification Login</span>
+            </a>
+
             {/* Supabase Status Badge */}
             <div
               className={`hidden md:flex items-center gap-1.5 px-3 py-1 rounded-full text-xs font-semibold border ${
@@ -762,6 +776,14 @@ export default function Home() {
               </span>
             )}
           </button>
+          <a
+            href="/verify"
+            target="_blank"
+            rel="noopener noreferrer"
+            className="px-3.5 py-2 rounded-lg text-xs font-bold flex items-center gap-2 transition shrink-0 text-amber-300 bg-amber-500/10 hover:bg-amber-500/20 border border-amber-500/30"
+          >
+            <Shield className="w-4 h-4 text-amber-400" /> Admin Verification Login
+          </a>
           <button
             onClick={() => setActiveTab('donations')}
             className={`px-3.5 py-2 rounded-lg text-xs font-semibold flex items-center gap-2 transition shrink-0 ${
@@ -2170,84 +2192,89 @@ export default function Home() {
                 <Server className="w-5 h-5 text-amber-400" /> Backend Architecture & Storage Breakdown
               </h3>
               <p className="text-xs text-slate-400">
-                All Supabase & Google Cloud credentials are securely configured via server environment variables (`.env.local`).
+                Primary Database: <strong>Supabase PostgreSQL</strong>. All authentication & settings are securely configured server-side.
               </p>
             </div>
 
-            {/* Architecture Cards: What is stored where? */}
-            <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
-              {/* Card 1: Supabase Database */}
-              <div className="bg-slate-900/90 border border-emerald-500/30 rounded-2xl p-6 relative overflow-hidden">
-                <div className="flex items-center justify-between mb-4">
-                  <div className="flex items-center gap-2.5">
-                    <div className="w-10 h-10 rounded-xl bg-emerald-500/10 text-emerald-400 flex items-center justify-center">
-                      <Database className="w-5 h-5" />
-                    </div>
-                    <div>
-                      <h4 className="text-base font-bold text-white">Supabase PostgreSQL (Primary DB)</h4>
-                      <p className="text-xs text-emerald-400 font-medium">Source of Truth & Deduplication</p>
-                    </div>
-                  </div>
-                  <span className={`px-2.5 py-1 rounded-full text-xs font-bold ${
-                    isSupabase ? 'bg-emerald-500/20 text-emerald-300' : 'bg-blue-500/20 text-blue-300'
-                  }`}>
-                    {isSupabase ? 'Active (Cloud)' : 'Local Persistent Fallback'}
-                  </span>
-                </div>
+            {/* Event Pass Artwork Configuration */}
+            <div className="bg-slate-900/90 border border-slate-800 rounded-2xl p-6 space-y-4">
+              <h3 className="text-sm font-bold text-white flex items-center gap-2">
+                🎨 Event Pass Custom Artwork URLs
+              </h3>
 
-                <div className="space-y-2.5 text-xs text-slate-300 mb-5">
-                  <p className="font-semibold text-white">What is stored in Supabase:</p>
-                  <ul className="space-y-1.5 list-disc pl-4 text-slate-400">
-                    <li><strong className="text-slate-200">event_records</strong>: Complete normalized data with strict <code className="text-amber-400 font-mono">order_id UNIQUE</code> indexing to guarantee zero double imports.</li>
-                    <li><strong className="text-slate-200">import_batches</strong>: Audit log of every uploaded file with counts of passes, donations, skipped duplicates, and timestamps.</li>
-                    <li><strong className="text-slate-200">import_errors</strong>: Detailed log of any unclassified or malformed rows for human review.</li>
-                    <li><strong className="text-slate-200">Event, Date & Division metadata</strong>: Tags for Garba Groove vs Navratri Utsav, payment date normalization, and volunteer attribution.</li>
-                  </ul>
-                </div>
-
-                <div className="p-3 bg-slate-950 rounded-xl border border-slate-800 text-[11px] text-slate-400">
-                  <strong className="text-slate-200">Backend Config (.env.local):</strong>
-                  <pre className="mt-1 text-slate-500 font-mono text-[10px]">
-                    NEXT_PUBLIC_SUPABASE_URL=https://your-id.supabase.co{'\n'}
-                    SUPABASE_SERVICE_ROLE_KEY=your-key
-                  </pre>
-                </div>
+              <div className="space-y-2">
+                <label className="text-xs font-bold text-slate-300">
+                  Navratri Utsav 2026 Pass Background Image URL
+                </label>
+                <input
+                  type="text"
+                  value={systemSettings.navratriPassBgUrl || ''}
+                  onChange={(e) => setSystemSettings({ ...systemSettings, navratriPassBgUrl: e.target.value })}
+                  placeholder="https://res.cloudinary.com/dhrj3rpg8/image/upload/..."
+                  className="w-full bg-slate-950 border border-slate-800 rounded-xl px-3.5 py-2.5 text-xs text-slate-200 focus:outline-none focus:border-amber-500 font-mono"
+                />
+                <p className="text-[11px] text-slate-500">Cloudinary image URL for Navratri Utsav 2026 passes (Event Date: 11 Oct 2026).</p>
               </div>
 
-              {/* Card 2: Google Sheets */}
-              <div className="bg-slate-900/90 border border-amber-500/30 rounded-2xl p-6 relative overflow-hidden">
-                <div className="flex items-center justify-between mb-4">
-                  <div className="flex items-center gap-2.5">
-                    <div className="w-10 h-10 rounded-xl bg-amber-500/10 text-amber-400 flex items-center justify-center">
-                      <FileSpreadsheet className="w-5 h-5" />
-                    </div>
-                    <div>
-                      <h4 className="text-base font-bold text-white">Google Sheets Integration Layer</h4>
-                      <p className="text-xs text-amber-400 font-medium">Downstream Zapier Automation</p>
-                    </div>
+              <div className="flex items-center justify-end pt-2">
+                <button
+                  onClick={async () => {
+                    try {
+                      const res = await fetch('/api/settings', {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify({ settings: systemSettings }),
+                      });
+                      const data = await res.json();
+                      if (data.success) {
+                        alert('Pass Artwork Settings saved successfully!');
+                      } else {
+                        alert(`Error saving settings: ${data.error}`);
+                      }
+                    } catch (err: any) {
+                      alert(`Network error saving settings: ${err.message}`);
+                    }
+                  }}
+                  className="px-4 py-2 rounded-xl bg-gradient-to-r from-amber-500 to-amber-600 hover:from-amber-400 hover:to-amber-500 text-slate-950 font-bold text-xs transition-all flex items-center gap-1.5"
+                >
+                  <Save className="w-4 h-4" /> Save Settings
+                </button>
+              </div>
+            </div>
+
+            {/* Architecture Card: Supabase PostgreSQL */}
+            <div className="bg-slate-900/90 border border-emerald-500/30 rounded-2xl p-6 relative overflow-hidden">
+              <div className="flex items-center justify-between mb-4">
+                <div className="flex items-center gap-2.5">
+                  <div className="w-10 h-10 rounded-xl bg-emerald-500/10 text-emerald-400 flex items-center justify-center">
+                    <Database className="w-5 h-5" />
                   </div>
-                  <span className="px-2.5 py-1 rounded-full text-xs font-bold bg-amber-500/20 text-amber-300">
-                    {systemSettings.googleSheetsMode === 'live' ? 'Live API Active' : 'Mock Mode (Safe Test)'}
-                  </span>
+                  <div>
+                    <h4 className="text-base font-bold text-white">Supabase PostgreSQL (Primary Cloud Database)</h4>
+                    <p className="text-xs text-emerald-400 font-medium">Single Source of Truth & Zero Duplicate Guarantee</p>
+                  </div>
                 </div>
+                <span className="px-2.5 py-1 rounded-full text-xs font-bold bg-emerald-500/20 text-emerald-300">
+                  Cloud Active
+                </span>
+              </div>
 
-                <div className="space-y-2.5 text-xs text-slate-300 mb-5">
-                  <p className="font-semibold text-white">What is stored in Google Sheets:</p>
-                  <ul className="space-y-1.5 list-disc pl-4 text-slate-400">
-                    <li><strong className="text-amber-300">PASS Tab</strong>: Only captured pass rows. Zapier monitors new rows here to automatically email tickets/QR codes to buyers.</li>
-                    <li><strong className="text-rose-300">DONATION Tab</strong>: Only captured donation rows with PAN numbers. Zapier monitors this tab to generate & email 80G tax receipts.</li>
-                    <li><strong className="text-slate-300">IMPORT LOG Tab</strong>: Summary of each batch ingestion for executive team visibility.</li>
-                  </ul>
-                </div>
+              <div className="space-y-2.5 text-xs text-slate-300 mb-5">
+                <p className="font-semibold text-white">Data Storage & Schema:</p>
+                <ul className="space-y-1.5 list-disc pl-4 text-slate-400">
+                  <li><strong className="text-slate-200">event_records</strong>: Complete normalized attendee dataset with strict <code className="text-amber-400 font-mono">order_id UNIQUE</code> indexing.</li>
+                  <li><strong className="text-slate-200">event_id Separation</strong>: Strict isolation between <code className="text-amber-300 font-mono">garba_groove</code> (Garba Groove 2026) and <code className="text-amber-300 font-mono">navratri_utsav</code> (Navratri Utsav 2026).</li>
+                  <li><strong className="text-slate-200">import_batches</strong>: Audit log of every uploaded Excel batch file.</li>
+                  <li><strong className="text-slate-200">Attendance Verification</strong>: Stores real-time check-in state (<code className="text-emerald-400 font-mono">PENDING</code> | <code className="text-emerald-400 font-mono">PRESENT</code> | <code className="text-emerald-400 font-mono">CANCELLED</code>) for venue scanners.</li>
+                </ul>
+              </div>
 
-                <div className="p-3 bg-slate-950 rounded-xl border border-slate-800 text-[11px] text-slate-400">
-                  <strong className="text-slate-200">Backend Config (.env.local):</strong>
-                  <pre className="mt-1 text-slate-500 font-mono text-[10px]">
-                    GOOGLE_SPREADSHEET_ID=your-sheet-id{'\n'}
-                    GOOGLE_SERVICE_ACCOUNT_EMAIL=sync@serviceaccount.com{'\n'}
-                    GOOGLE_SHEETS_MODE=live
-                  </pre>
-                </div>
+              <div className="p-3 bg-slate-950 rounded-xl border border-slate-800 text-[11px] text-slate-400">
+                <strong className="text-slate-200">Database Connection (.env.local):</strong>
+                <pre className="mt-1 text-slate-500 font-mono text-[10px]">
+                  NEXT_PUBLIC_SUPABASE_URL=https://your-id.supabase.co{'\n'}
+                  SUPABASE_SERVICE_ROLE_KEY=your-key
+                </pre>
               </div>
             </div>
           </div>

@@ -112,6 +112,8 @@ export interface EventRecord {
   import_batch_id: string;
   email_status: EmailStatus;
   email_sent_at?: string | null;
+  attendance_status?: 'PENDING' | 'PRESENT' | 'CANCELLED';
+  checked_in_at?: string | null;
   created_at: string;
 }
 
@@ -142,6 +144,9 @@ export interface SystemSettings {
   supabaseAnonKey?: string;
   supabaseServiceKey?: string;
   googleSpreadsheetId?: string;
+  garbaGrooveSpreadsheetId?: string;
+  navratriUtsavSpreadsheetId?: string;
+  navratriPassBgUrl?: string;
   googleServiceAccountEmail?: string;
   googlePrivateKey?: string;
   googleSheetsMode: 'mock' | 'live';
@@ -149,6 +154,40 @@ export interface SystemSettings {
   passKeywords: string[];
   donationKeywords: string[];
 }
+
+export interface EventConfig {
+  id: 'garba_groove' | 'navratri_utsav';
+  name: string;
+  shortName: string;
+  tagline: string;
+  date: string;
+  venue: string;
+  passBgUrl: string;
+  keywords: string[];
+}
+
+export const EVENT_CONFIGS: Record<'garba_groove' | 'navratri_utsav', EventConfig> = {
+  garba_groove: {
+    id: 'garba_groove',
+    name: 'Garba Groove 2026',
+    shortName: 'Garba Groove',
+    tagline: 'Presented by Street Cause Hyderabad',
+    date: '10 Oct 2026',
+    venue: 'Telangana Gardens, New Bowenpally',
+    passBgUrl: 'https://res.cloudinary.com/dhrj3rpg8/image/upload/v1789971984/EVENT_PASS.png',
+    keywords: ['garba', 'groove'],
+  },
+  navratri_utsav: {
+    id: 'navratri_utsav',
+    name: 'Navratri Utsav 2026',
+    shortName: 'Navratri Utsav',
+    tagline: 'Presented by Street Cause Hyderabad',
+    date: '11 Oct 2026',
+    venue: 'Telangana Gardens, New Bowenpally',
+    passBgUrl: 'https://res.cloudinary.com/dhrj3rpg8/image/upload/v1789971984/EVENT_PASS.png',
+    keywords: ['navratri', 'utsav', 'nirvana'],
+  },
+};
 
 export interface PreImportAnalysis {
   fileName: string;

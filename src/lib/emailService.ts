@@ -1,7 +1,8 @@
 import nodemailer from 'nodemailer';
 import fs from 'fs';
 import path from 'path';
-import { EventRecord } from './types';
+import { EVENT_CONFIGS, EventRecord } from './types';
+import { getSettings } from './db';
 
 // Helper to get latest env variables even if server hasn't restarted
 function getEnvConfig() {
@@ -72,183 +73,162 @@ function getTransporter() {
   });
 }
 
+
+
 export function generatePassEmailHTML(record: EventRecord): string {
-  const isGarbaGroove = record.event_id === 'garba_groove';
-  
-  // Theme colors based on event
-  const themeColor = isGarbaGroove ? '#f59e0b' : '#9333ea'; // amber-500 vs purple-600
-  const gradientStart = isGarbaGroove ? '#f59e0b' : '#9333ea';
-  const gradientEnd = isGarbaGroove ? '#e11d48' : '#f59e0b'; // rose-600 vs amber-500
-  const eventName = isGarbaGroove ? 'Garba Groove 2026' : 'Navratri Utsav 2026';
-  const eventSubname = isGarbaGroove ? 'Youth & Family Dandiya Night' : 'Grand Divine Mahotsav';
+  const eventIdKey = record.event_id === 'navratri_utsav' ? 'navratri_utsav' : 'garba_groove';
+  const config = EVENT_CONFIGS[eventIdKey];
+  const settings = getSettings();
 
-  const attendeeName = record.name || 'Valued Guest';
+  const eventName = config.name;
+  const eventDate = config.date;
+  const passBgUrl = (eventIdKey === 'navratri_utsav' && settings.navratriPassBgUrl && settings.navratriPassBgUrl.trim()) 
+    ? settings.navratriPassBgUrl.trim() 
+    : config.passBgUrl;
 
-  return `
-    <!DOCTYPE html>
-    <html>
-    <head>
-      <meta charset="utf-8">
-      <title>Your ${eventName} Pass</title>
-      <style>
-        body {
-          font-family: 'Segoe UI', Roboto, Helvetica, Arial, sans-serif;
-          background-color: #f8fafc;
-          margin: 0;
-          padding: 0;
-          color: #0f172a;
-        }
-        .container {
-          max-width: 600px;
-          margin: 40px auto;
-          background: #ffffff;
-          border-radius: 16px;
-          overflow: hidden;
-          box-shadow: 0 10px 25px rgba(0,0,0,0.05);
-          border: 1px solid #e2e8f0;
-        }
-        .header {
-          background: linear-gradient(135deg, ${gradientStart}, ${gradientEnd});
-          padding: 40px 30px;
-          text-align: center;
-          color: white;
-        }
-        .header h1 {
-          margin: 0;
-          font-size: 28px;
-          font-weight: 800;
-          letter-spacing: -0.5px;
-        }
-        .header p {
-          margin: 8px 0 0;
-          font-size: 16px;
-          opacity: 0.9;
-        }
-        .content {
-          padding: 40px 30px;
-        }
-        .greeting {
-          font-size: 20px;
-          font-weight: 600;
-          margin-bottom: 24px;
-        }
-        .pass-details {
-          background: #f1f5f9;
-          border-radius: 12px;
-          padding: 24px;
-          margin-bottom: 32px;
-        }
-        .pass-details h2 {
-          margin: 0 0 16px;
-          font-size: 18px;
-          color: #334155;
-          text-transform: uppercase;
-          letter-spacing: 1px;
-          font-weight: 700;
-        }
-        .detail-row {
-          display: flex;
-          justify-content: space-between;
-          padding: 12px 0;
-          border-bottom: 1px solid #e2e8f0;
-        }
-        .detail-row:last-child {
-          border-bottom: none;
-          padding-bottom: 0;
-        }
-        .detail-label {
-          color: #64748b;
-          font-weight: 500;
-        }
-        .detail-value {
-          font-weight: 600;
-          color: #0f172a;
-          text-align: right;
-        }
-        .order-id {
-          font-family: monospace;
-          background: #e2e8f0;
-          padding: 4px 8px;
-          border-radius: 6px;
-          color: ${themeColor};
-          font-weight: 700;
-          font-size: 16px;
-        }
-        .qr-placeholder {
-          text-align: center;
-          margin: 32px 0;
-        }
-        .footer {
-          background: #f8fafc;
-          padding: 24px 30px;
-          text-align: center;
-          font-size: 14px;
-          color: #64748b;
-          border-top: 1px solid #e2e8f0;
-        }
-      </style>
-    </head>
-    <body>
-      <div class="container">
-        <div class="header">
-          <h1>${eventName}</h1>
-          <p>${eventSubname}</p>
-        </div>
+  const codeValue = record.order_id || record.code || '';
+  const encodedCode = encodeURIComponent(codeValue);
+  const verifyUrl = `https://sc-dandiya-2026.vercel.app/verify?code=${encodedCode}`;
+  const qrCodeImgUrl = `https://api.qrserver.com/v1/create-qr-code/?size=235x235&data=${encodeURIComponent(verifyUrl)}`;
+
+  const attendeeName = record.name || '';
+  const mobile = record.phone || '';
+  const email = record.email || '';
+  const admits = record.item_quantity || 1;
+  const amount = `${record.item_payment_amount || record.item_amount || 0}/-`;
+  const l1Name = record.divisions || '';
+  const l2Name = record.l2 || '';
+
+  return `<!DOCTYPE html>
+<html xmlns="http://www.w3.org/1999/xhtml">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Street Cause Hyderabad - ${eventName} Pass</title>
+  <style>
+    html, body { margin: 0 !important; padding: 0 !important; width: 100% !important; background-color: #050a32; font-family: Arial, Helvetica, sans-serif; }
+    table { border-collapse: collapse !important; mso-table-lspace: 0pt; mso-table-rspace: 0pt; }
+    td { padding: 0; }
+    img { display: block; border: 0; outline: none; text-decoration: none; }
+    .label-text { font-family: Arial, Helvetica, sans-serif; font-size: 16px; font-weight: 700; color: #ffffff; line-height: 1.75; }
+    .value-text { font-family: Arial, Helvetica, sans-serif; font-size: 16px; font-weight: 400; color: #ffffff; line-height: 1.75; }
+  </style>
+</head>
+<body style="margin: 0; padding: 0; background-color: #050a32;">
+  <!-- Main Outer Container -->
+  <table role="presentation" width="100%" border="0" cellspacing="0" cellpadding="0" style="background-color: #050a32; width: 100%;">
+    <tr>
+      <td align="center" style="padding: 20px 10px;">
         
-        <div class="content">
-          <div class="greeting">
-            Hello ${attendeeName},
-          </div>
-          <p style="line-height: 1.6; color: #475569; margin-bottom: 32px;">
-            Thank you for booking your pass for <strong>${eventName}</strong>. Your payment was successful, and your pass details are confirmed below. Please present this email (or the Order ID) at the entry gate.
-          </p>
+        <!-- TOP INTRODUCTORY GREETING CARD -->
+        <table role="presentation" width="1215" border="0" cellspacing="0" cellpadding="0" style="width: 100%; max-width: 1215px; margin-bottom: 25px; background-color: #0c1445; border: 1px solid #1e2966; border-radius: 16px; font-family: Arial, Helvetica, sans-serif; color: #ffffff;">
+          <tr>
+            <td style="padding: 25px 30px; line-height: 1.6; font-size: 15px; color: #e2e8f0;">
+              <p style="margin-top: 0; font-size: 18px; font-weight: 700; color: #fbbf24;">Dear ${attendeeName || 'Valued Guest'},</p>
+
+              <p style="margin-bottom: 12px;">
+                Thank you for registering for <strong>${eventName}</strong>, presented by <strong>Street Cause Hyderabad</strong>! 💃🕺
+              </p>
+
+              <p style="margin-bottom: 0;">
+                Your event pass is displayed below. Please keep this email safe and present the QR code at the venue for entry.
+              </p>
+            </td>
+          </tr>
+        </table>
+
+        <!-- PASS CANVAS TABLE (1215 x 1519 aspect ratio) -->
+        <table role="presentation" width="1215" border="0" cellspacing="0" cellpadding="0" 
+               background="${passBgUrl}"
+               style="width: 100%; max-width: 1215px; margin-bottom: 25px; background-image: url('${passBgUrl}'); background-repeat: no-repeat; background-position: center top; background-size: 100% 100%; border-collapse: collapse;">
           
-          <div class="pass-details">
-            <h2>Pass Information</h2>
-            
-            <div class="detail-row">
-              <span class="detail-label">Order ID</span>
-              <span class="detail-value order-id">${record.order_id}</span>
-            </div>
-            
-            <div class="detail-row">
-              <span class="detail-label">Pass Type</span>
-              <span class="detail-value">${record.item_name}</span>
-            </div>
-            
-            <div class="detail-row">
-              <span class="detail-label">Quantity</span>
-              <span class="detail-value" style="font-size: 18px;">${record.item_quantity}</span>
-            </div>
-            
-            <div class="detail-row">
-              <span class="detail-label">Payment Date</span>
-              <span class="detail-value">${record.payment_date || record.created_at?.split('T')[0] || '-'}</span>
-            </div>
-            
-            <div class="detail-row">
-              <span class="detail-label">Amount Paid</span>
-              <span class="detail-value">₹${record.item_payment_amount || 0}</span>
-            </div>
-          </div>
-          
-          <div class="qr-placeholder">
-            <p style="margin-bottom: 12px; font-weight: 600; color: #475569;">Present this Order ID for entry:</p>
-            <div style="font-size: 32px; font-family: monospace; font-weight: 800; color: ${themeColor}; letter-spacing: 2px;">
-              ${record.order_id}
-            </div>
-          </div>
-          
-        </div>
-        
-        <div class="footer">
-          <p style="margin: 0 0 8px;"><strong>SC Dandiya 2026</strong> • Organized by SC Community</p>
-          <p style="margin: 0; font-size: 12px;">This is an automated email. Please do not reply directly to this message.</p>
-        </div>
-      </div>
-    </body>
-    </html>
-  `;
+          <!-- TOP ROW: QR CODE IN TOP RIGHT WHITE BOX -->
+          <tr>
+            <td width="70%" style="vertical-align: top; padding-top: 140px; padding-left: 45px;">
+              &nbsp;
+            </td>
+            <td width="30%" style="vertical-align: top; padding-top: 140px; padding-right: 55px; text-align: right;">
+              <img src="${qrCodeImgUrl}" 
+                   width="235" height="235" alt="Pass QR Code" style="display: block; width: 235px; height: 235px; border: 0; margin-left: auto;" />
+            </td>
+          </tr>
+
+          <!-- DYNAMIC FIELDS OVERLAY ROW -->
+          <tr>
+            <td colspan="2" style="vertical-align: top; padding-top: 0px; padding-left: 45px; padding-right: 45px; padding-bottom: 900px;">
+              <table role="presentation" width="100%" border="0" cellspacing="0" cellpadding="0" style="margin-top: -65px;">
+                <tr>
+                  
+                  <!-- LEFT COLUMN -->
+                  <td width="48%" style="vertical-align: top; font-family: Arial, Helvetica, sans-serif; font-size: 16px; color: #ffffff;">
+                    <div><span class="label-text">Name:</span> <span class="value-text">${attendeeName}</span></div>
+                    <div><span class="label-text">Code:</span> <span class="value-text">${codeValue}</span></div>
+                    <div><span class="label-text">mobile:</span> <span class="value-text">${mobile}</span></div>
+                    <div><span class="label-text">Email ID:</span> <span class="value-text">${email}</span></div>
+                    <div><span class="label-text">Payment mode:</span> <span class="value-text">Online</span></div>
+                    <div><span class="label-text">Type:</span> <span class="value-text">Event Pass</span></div>
+                  </td>
+
+                  <!-- SPACING COLUMN -->
+                  <td width="4%">&nbsp;</td>
+
+                  <!-- RIGHT COLUMN -->
+                  <td width="48%" style="vertical-align: top; font-family: Arial, Helvetica, sans-serif; font-size: 16px; color: #ffffff;">
+                    <div><span class="label-text">Admits:</span> <span class="value-text">${admits}</span></div>
+                    <div><span class="label-text">Amount:</span> <span class="value-text">${amount}</span></div>
+                    <div><span class="label-text">Date:</span> <span class="value-text">${eventDate}</span></div>
+                    <div><span class="label-text">Venue:</span> <span class="value-text">Telangana Gardens,New Bowenpally</span></div>
+                    <div><span class="label-text">L1's Name:</span> <span class="value-text">${l1Name}</span></div>
+                    <div><span class="label-text">L2's Name:</span> <span class="value-text">${l2Name}</span></div>
+                  </td>
+
+                </tr>
+              </table>
+            </td>
+          </tr>
+
+        </table>
+
+        <!-- BOTTOM IMPORTANT GUIDELINES & CLOSING CARD -->
+        <table role="presentation" width="1215" border="0" cellspacing="0" cellpadding="0" style="width: 100%; max-width: 1215px; background-color: #0c1445; border: 1px solid #1e2966; border-radius: 16px; font-family: Arial, Helvetica, sans-serif; color: #ffffff;">
+          <tr>
+            <td style="padding: 30px; line-height: 1.6; font-size: 15px; color: #e2e8f0;">
+
+              <!-- IMPORTANT GUIDELINES BOX -->
+              <div style="background-color: #162058; border-left: 4px solid #f59e0b; padding: 16px 20px; border-radius: 8px; margin-bottom: 24px;">
+                <div style="font-weight: 700; font-size: 16px; color: #fbbf24; margin-bottom: 10px;">
+                  ⚠️ Important
+                </div>
+                <ul style="margin: 0; padding-left: 20px; color: #cbd5e1; line-height: 1.7;">
+                  <li style="margin-bottom: 6px;">Please carry your valid Pass for entry.</li>
+                  <li style="margin-bottom: 6px;">The QR code is for one-time verification and should not be shared with others.</li>
+                  <li style="margin-bottom: 6px;">Guests with multiple admits should arrive together, as the QR code will be scanned for the group.</li>
+                  <li style="margin-bottom: 0;">Please follow the Terms &amp; Conditions mentioned on your event pass.</li>
+                </ul>
+              </div>
+
+              <p style="margin-bottom: 16px; font-weight: 500; color: #f1f5f9;">
+                We look forward to celebrating an unforgettable evening of music, colours and Garba with you! ✨<br>
+                <strong>See you on the dance floor! 💃🕺</strong>
+              </p>
+
+              <div style="margin-top: 24px; padding-top: 16px; border-top: 1px solid #1e2966; font-size: 13px; color: #94a3b8;">
+                <strong style="color: #ffffff;">Warm regards,</strong><br>
+                <strong style="color: #fbbf24; font-size: 14px;">Street Cause Hyderabad</strong><br>
+                <em style="color: #cbd5e1;">“A life without a cause is a life without an effect.”</em><br>
+                <span style="display: inline-block; margin-top: 6px;">
+                  📧 <a href="mailto:streetcause@gmail.com" style="color: #38bdf8; text-decoration: none;">streetcause@gmail.com</a> &nbsp;|&nbsp; 📱 @streetcausehyderabad
+                </span>
+              </div>
+            </td>
+          </tr>
+        </table>
+
+      </td>
+    </tr>
+  </table>
+</body>
+</html>`;
 }
 
 export async function sendPassEmail(record: EventRecord): Promise<{ success: boolean; error?: string }> {
@@ -264,11 +244,14 @@ export async function sendPassEmail(record: EventRecord): Promise<{ success: boo
     const fromName = env.SMTP_FROM_NAME || 'SC Dandiya 2026';
     const fromEmail = env.SMTP_FROM_EMAIL || env.SMTP_USER;
 
+    const passCode = record.code || record.order_id || '';
+    const subjectLine = passCode ? `Your ${eventName} Pass - ${passItemName} (${passCode})` : `Your ${eventName} Pass - ${passItemName}`;
+
     await transporter.sendMail({
       from: `"${fromName}" <${fromEmail}>`,
       replyTo: fromEmail,
       to: record.email.trim(),
-      subject: `Your ${eventName} Pass - ${passItemName}`,
+      subject: subjectLine,
       html: generatePassEmailHTML(record),
     });
 
