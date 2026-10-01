@@ -195,6 +195,28 @@ export function getRecordTableName(eventId?: string): string {
   return 'event_records';
 }
 
+// Helper to fetch ALL rows from a Supabase table handling PostgREST 1000-row pagination limit
+async function fetchAllFromSupabase<T = any>(
+  client: SupabaseClient,
+  tableName: string,
+  selectFields: string = '*'
+): Promise<T[]> {
+  const all: T[] = [];
+  let page = 0;
+  const pageSize = 1000;
+  while (true) {
+    const { data, error } = await client
+      .from(tableName)
+      .select(selectFields)
+      .range(page * pageSize, (page + 1) * pageSize - 1);
+    if (error || !data || data.length === 0) break;
+    all.push(...(data as T[]));
+    if (data.length < pageSize) break;
+    page++;
+  }
+  return all;
+}
+
 // Check existing order_ids across all event tables for deduplication
 export async function getExistingOrderIds(): Promise<Set<string>> {
   const client = getSupabaseClient();
@@ -202,16 +224,16 @@ export async function getExistingOrderIds(): Promise<Set<string>> {
     try {
       const ids = new Set<string>();
 
-      // Fetch from both separate tables in parallel
-      const [garbaRes, navratriRes, legacyRes] = await Promise.all([
-        client.from('garba_groove_records').select('order_id'),
-        client.from('navratri_utsav_records').select('order_id'),
-        client.from('event_records').select('order_id'),
+      // Fetch from both separate tables in parallel with full pagination
+      const [garbaRows, navratriRows, legacyRows] = await Promise.all([
+        fetchAllFromSupabase<{ order_id: string }>(client, 'garba_groove_records', 'order_id'),
+        fetchAllFromSupabase<{ order_id: string }>(client, 'navratri_utsav_records', 'order_id'),
+        fetchAllFromSupabase<{ order_id: string }>(client, 'event_records', 'order_id'),
       ]);
 
-      if (garbaRes.data) garbaRes.data.forEach((r: { order_id: string }) => ids.add(r.order_id));
-      if (navratriRes.data) navratriRes.data.forEach((r: { order_id: string }) => ids.add(r.order_id));
-      if (legacyRes.data) legacyRes.data.forEach((r: { order_id: string }) => ids.add(r.order_id));
+      if (garbaRows) garbaRows.forEach((r) => ids.add(r.order_id));
+      if (navratriRows) navratriRows.forEach((r) => ids.add(r.order_id));
+      if (legacyRows) legacyRows.forEach((r) => ids.add(r.order_id));
 
       return ids;
     } catch (err) {
@@ -593,37 +615,35 @@ export function computeDivisionStats(records: EventRecord[]): DivisionStats[] {
   return result.sort((a, b) => b.totalPasses - a.totalPasses || b.totalDonationAmount - a.totalDonationAmount);
 }
 
-// Fetch all records from Supabase tables dynamically
+// Fetch all records from Supabase tables dynamically with full pagination
 async function fetchSupabaseRecords(client: SupabaseClient, eventId?: string): Promise<EventRecord[]> {
-  const records: EventRecord[] = [];
-
   if (eventId === 'garba_groove') {
-    const { data } = await client.from('garba_groove_records').select('*');
-    if (data && data.length > 0) return data as EventRecord[];
+    const data = await fetchAllFromSupabase<EventRecord>(client, 'garba_groove_records');
+    if (data && data.length > 0) return data;
     // Fallback to event_records view
-    const { data: viewData } = await client.from('event_records').select('*').eq('event_id', 'garba_groove');
-    return (viewData || []) as EventRecord[];
+    const viewData = await fetchAllFromSupabase<EventRecord>(client, 'event_records');
+    return viewData.filter((r) => r.event_id === 'garba_groove');
   }
 
   if (eventId === 'navratri_utsav') {
-    const { data } = await client.from('navratri_utsav_records').select('*');
-    if (data && data.length > 0) return data as EventRecord[];
+    const data = await fetchAllFromSupabase<EventRecord>(client, 'navratri_utsav_records');
+    if (data && data.length > 0) return data;
     // Fallback to event_records view
-    const { data: viewData } = await client.from('event_records').select('*').eq('event_id', 'navratri_utsav');
-    return (viewData || []) as EventRecord[];
+    const viewData = await fetchAllFromSupabase<EventRecord>(client, 'event_records');
+    return viewData.filter((r) => r.event_id === 'navratri_utsav');
   }
 
-  // Event ID is 'all' or unspecified -> fetch from both tables
-  const [garbaRes, navratriRes, legacyRes] = await Promise.all([
-    client.from('garba_groove_records').select('*'),
-    client.from('navratri_utsav_records').select('*'),
-    client.from('event_records').select('*'),
+  // Event ID is 'all' or unspecified -> fetch from all tables
+  const [garbaData, navratriData, legacyData] = await Promise.all([
+    fetchAllFromSupabase<EventRecord>(client, 'garba_groove_records'),
+    fetchAllFromSupabase<EventRecord>(client, 'navratri_utsav_records'),
+    fetchAllFromSupabase<EventRecord>(client, 'event_records'),
   ]);
 
   const recordMap = new Map<string, EventRecord>();
-  if (garbaRes.data) garbaRes.data.forEach((r) => recordMap.set(r.order_id, r as EventRecord));
-  if (navratriRes.data) navratriRes.data.forEach((r) => recordMap.set(r.order_id, r as EventRecord));
-  if (legacyRes.data) legacyRes.data.forEach((r) => { if (!recordMap.has(r.order_id)) recordMap.set(r.order_id, r as EventRecord); });
+  if (garbaData) garbaData.forEach((r) => recordMap.set(r.order_id, r));
+  if (navratriData) navratriData.forEach((r) => recordMap.set(r.order_id, r));
+  if (legacyData) legacyData.forEach((r) => { if (!recordMap.has(r.order_id)) recordMap.set(r.order_id, r); });
 
   return Array.from(recordMap.values());
 }
@@ -824,12 +844,14 @@ export async function getImportBatches(eventId?: string): Promise<ImportBatch[]>
   const client = getSupabaseClient();
   if (isUsingSupabase() && client) {
     try {
-      let query = client.from('import_batches').select('*').order('created_at', { ascending: false });
-      if (eventId && eventId !== 'all') {
-        query = query.eq('event_id', eventId);
+      const data = await fetchAllFromSupabase<ImportBatch>(client, 'import_batches');
+      if (data && data.length > 0) {
+        let list = data.sort((a, b) => new Date(b.created_at || 0).getTime() - new Date(a.created_at || 0).getTime());
+        if (eventId && eventId !== 'all') {
+          list = list.filter((b) => (b.event_id || 'garba_groove') === eventId);
+        }
+        return list;
       }
-      const { data, error } = await query;
-      if (!error && data) return data as ImportBatch[];
     } catch (err) {
       console.warn('Supabase getImportBatches error:', err);
     }
