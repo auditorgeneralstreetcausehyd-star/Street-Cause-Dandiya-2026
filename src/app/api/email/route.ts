@@ -1,9 +1,22 @@
-import { NextResponse } from 'next/server';
+import { NextRequest, NextResponse } from 'next/server';
 import { getRecordsByOrderIds, updateRecordEmailStatus } from '@/lib/db';
 import { sendBulkPassEmails } from '@/lib/emailService';
+import { requireAuth } from '@/lib/auth';
+import { checkRateLimit } from '@/lib/rateLimit';
+import { invalidateCache } from '@/lib/cache';
 
-export async function POST(request: Request) {
+export async function POST(request: NextRequest) {
   try {
+    const rateCheck = checkRateLimit(request, 'api_email_send', { limit: 15, windowSeconds: 60 });
+    if (!rateCheck.allowed && rateCheck.response) {
+      return rateCheck.response;
+    }
+
+    const authCheck = requireAuth(request);
+    if (!authCheck.authenticated && authCheck.response) {
+      return authCheck.response;
+    }
+
     const body = await request.json();
     const { orderIds, eventId } = body;
 
@@ -41,6 +54,8 @@ export async function POST(request: Request) {
         await updateRecordEmailStatus(res.orderId, 'Failed', null);
       }
     }
+
+    invalidateCache('records_');
 
     return NextResponse.json({
       success: true,

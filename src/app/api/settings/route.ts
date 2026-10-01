@@ -1,8 +1,16 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { getSettings, saveSettings, testSupabaseConnection } from '@/lib/db';
 import { testGoogleSheetsConnection } from '@/lib/googleSheets';
+import { requireAuth } from '@/lib/auth';
+import { checkRateLimit } from '@/lib/rateLimit';
 
-export async function GET() {
+export async function GET(req: NextRequest) {
+  // Authentication check
+  const authCheck = requireAuth(req);
+  if (!authCheck.authenticated && authCheck.response) {
+    return authCheck.response;
+  }
+
   const settings = getSettings();
   // Mask sensitive keys for safety
   const safeSettings = {
@@ -15,6 +23,16 @@ export async function GET() {
 
 export async function POST(req: NextRequest) {
   try {
+    const rateCheck = checkRateLimit(req, 'api_settings_post', { limit: 30, windowSeconds: 60 });
+    if (!rateCheck.allowed && rateCheck.response) {
+      return rateCheck.response;
+    }
+
+    const authCheck = requireAuth(req);
+    if (!authCheck.authenticated && authCheck.response) {
+      return authCheck.response;
+    }
+
     const body = await req.json();
     const action = body.action;
 

@@ -41,7 +41,13 @@ import {
   Send,
   Filter,
   Link as LinkIcon,
-  Save
+  Save,
+  Lock,
+  LogOut,
+  KeyRound,
+  EyeOff,
+  UserCheck,
+  ShieldCheck
 } from 'lucide-react';
 import { DashboardStats, ImportBatch, EventRecord, PreImportAnalysis, EventId, DayWiseStat, VolunteerStat, DivisionStats, SystemSettings } from '@/lib/types';
 
@@ -83,6 +89,18 @@ const EVENTS_META: Record<'garba_groove' | 'navratri_utsav', EventMeta> = {
 };
 
 export default function Home() {
+  // Authentication State
+  const [isAuthenticated, setIsAuthenticated] = useState<boolean>(false);
+  const [authLoading, setAuthLoading] = useState<boolean>(true);
+  const [userEmail, setUserEmail] = useState<string>('');
+  const [loginEmail, setLoginEmail] = useState<string>('');
+  const [loginPassword, setLoginPassword] = useState<string>('');
+  const [loginError, setLoginError] = useState<string | null>(null);
+  const [loginLoading, setLoginLoading] = useState<boolean>(false);
+  const [showPassword, setShowPassword] = useState<boolean>(false);
+  const [isDataCached, setIsDataCached] = useState<boolean>(false);
+  const [cacheAgeSeconds, setCacheAgeSeconds] = useState<number>(0);
+
   // Event Scope State
   const [selectedEvent, setSelectedEvent] = useState<EventId | null>('garba_groove');
   const [showEventHub, setShowEventHub] = useState<boolean>(false);
@@ -272,16 +290,97 @@ export default function Home() {
     donationKeywords: ['donation', 'donate', 'daan', 'seva', 'contribut', 'sponsorship', 'support'],
   });
 
+  // Auth Check
+  const checkAuth = useCallback(async () => {
+    try {
+      setAuthLoading(true);
+      const res = await fetch('/api/auth/me');
+      const data = await res.json();
+      if (res.ok && data.authenticated) {
+        setIsAuthenticated(true);
+        setUserEmail(data.user?.email || '');
+      } else {
+        setIsAuthenticated(false);
+        setUserEmail('');
+      }
+    } catch {
+      setIsAuthenticated(false);
+      setUserEmail('');
+    } finally {
+      setAuthLoading(false);
+    }
+  }, []);
+
+  useEffect(() => {
+    void checkAuth();
+  }, [checkAuth]);
+
+  // Auth Handlers
+  const handleLogin = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!loginEmail || !loginPassword) {
+      setLoginError('Please enter email and password.');
+      return;
+    }
+    setLoginLoading(true);
+    setLoginError(null);
+    try {
+      const res = await fetch('/api/auth/login', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ email: loginEmail, password: loginPassword }),
+      });
+      const data = await res.json();
+      if (res.ok && data.success) {
+        setIsAuthenticated(true);
+        setUserEmail(data.user?.email || loginEmail);
+        setLoginEmail('');
+        setLoginPassword('');
+        setLoginError(null);
+        void refreshAll(selectedEvent, true);
+      } else {
+        setLoginError(data.error || 'Invalid credentials');
+      }
+    } catch {
+      setLoginError('Network connection error. Please try again.');
+    } finally {
+      setLoginLoading(false);
+    }
+  };
+
+  const handleLogout = async () => {
+    try {
+      await fetch('/api/auth/logout', { method: 'POST' });
+    } catch (err) {
+      console.error('Logout error:', err);
+    } finally {
+      setIsAuthenticated(false);
+      setUserEmail('');
+      setStats(null);
+      setBatches([]);
+      setPasses([]);
+      setDonations([]);
+    }
+  };
+
   // Fetch Dashboard Stats & Batches for Active Event
-  const fetchStats = useCallback(async (eventId?: EventId | null) => {
+  const fetchStats = useCallback(async (eventId?: EventId | null, forceRefresh = false) => {
     try {
       setRefreshing(true);
-      const evParam = eventId ? `?eventId=${eventId}` : '';
-      const res = await fetch(`/api/stats${evParam}`);
+      const params = new URLSearchParams();
+      if (eventId) params.set('eventId', eventId);
+      if (forceRefresh) params.set('forceRefresh', 'true');
+      const res = await fetch(`/api/stats?${params.toString()}`);
+      if (res.status === 401) {
+        setIsAuthenticated(false);
+        return;
+      }
       const data = await res.json();
       if (data.success) {
         setStats(data.stats);
         setIsSupabase(data.isSupabase);
+        setIsDataCached(Boolean(data.isCached));
+        setCacheAgeSeconds(data.cacheAgeSeconds || 0);
         if (data.settings) setSystemSettings(data.settings);
       }
     } catch (err) {
@@ -296,6 +395,10 @@ export default function Home() {
     try {
       const evParam = eventId ? `?eventId=${eventId}` : '';
       const res = await fetch(`/api/history${evParam}`);
+      if (res.status === 401) {
+        setIsAuthenticated(false);
+        return;
+      }
       const data = await res.json();
       if (data.success) {
         setBatches(data.batches || []);
@@ -316,6 +419,10 @@ export default function Home() {
       params.set('limit', '5000');
 
       const res = await fetch(`/api/records?${params.toString()}`);
+      if (res.status === 401) {
+        setIsAuthenticated(false);
+        return;
+      }
       const data = await res.json();
       if (data.success) {
         setPasses(data.records || []);
@@ -335,6 +442,10 @@ export default function Home() {
       params.set('limit', '5000');
 
       const res = await fetch(`/api/records?${params.toString()}`);
+      if (res.status === 401) {
+        setIsAuthenticated(false);
+        return;
+      }
       const data = await res.json();
       if (data.success) {
         setDonations(data.records || []);
@@ -346,10 +457,10 @@ export default function Home() {
 
   // Refresh All for Event
   const refreshAll = useCallback(
-    async (eventId: EventId | null) => {
+    async (eventId: EventId | null, forceRefresh = false) => {
       setLoading(true);
       await Promise.all([
-        fetchStats(eventId),
+        fetchStats(eventId, forceRefresh),
         fetchBatches(eventId),
         fetchPasses(passSearch, passDivisionFilter, eventId),
         fetchDonations(donationSearch, eventId),
@@ -360,13 +471,13 @@ export default function Home() {
   );
 
   useEffect(() => {
-    if (selectedEvent) {
-      void refreshAll(selectedEvent);
+    if (isAuthenticated && selectedEvent) {
+      void refreshAll(selectedEvent, false);
       if (selectedEvent !== 'all') {
         setUploadTargetEvent(selectedEvent as 'garba_groove' | 'navratri_utsav');
       }
     }
-  }, [selectedEvent, refreshAll]);
+  }, [isAuthenticated, selectedEvent, refreshAll]);
 
   // Stage 1: Analyze File on Select
   const handleFileSelect = async (e: React.ChangeEvent<HTMLInputElement>) => {
@@ -479,6 +590,169 @@ export default function Home() {
 
   // Available unique dates
   const availableDates = stats?.dayWiseStats || [];
+
+  // AUTHENTICATION CHECKING LOADING SCREEN
+  if (authLoading) {
+    return (
+      <div className="min-h-screen bg-slate-950 text-slate-100 flex items-center justify-center p-6 relative overflow-hidden">
+        <div className="absolute -top-40 -left-40 w-96 h-96 bg-amber-500/15 rounded-full blur-3xl pointer-events-none" />
+        <div className="absolute bottom-0 right-0 w-96 h-96 bg-purple-600/15 rounded-full blur-3xl pointer-events-none" />
+        <div className="text-center z-10">
+          <div className="w-16 h-16 rounded-2xl bg-gradient-to-tr from-amber-500 via-rose-500 to-purple-600 flex items-center justify-center shadow-xl shadow-amber-500/20 mx-auto mb-4 animate-pulse">
+            <Sparkles className="w-8 h-8 text-white" />
+          </div>
+          <h2 className="text-xl font-bold bg-clip-text text-transparent bg-gradient-to-r from-amber-300 via-rose-300 to-purple-300">
+            SC Dandiya 2026
+          </h2>
+          <p className="text-xs text-slate-400 mt-1 flex items-center justify-center gap-2">
+            <RefreshCw className="w-3.5 h-3.5 animate-spin text-amber-400" /> Verifying Auditor Session Security...
+          </p>
+        </div>
+      </div>
+    );
+  }
+
+  // AUDITOR LOGIN PORTAL (WHEN NOT AUTHENTICATED)
+  if (!isAuthenticated) {
+    return (
+      <div className="min-h-screen bg-slate-950 text-slate-100 flex flex-col justify-between p-6 md:p-12 relative overflow-hidden">
+        {/* Background glow ornaments */}
+        <div className="absolute -top-40 -left-40 w-96 h-96 bg-amber-500/15 rounded-full blur-3xl pointer-events-none" />
+        <div className="absolute top-1/2 right-0 w-96 h-96 bg-purple-600/15 rounded-full blur-3xl pointer-events-none" />
+        <div className="absolute -bottom-40 left-1/3 w-96 h-96 bg-rose-500/10 rounded-full blur-3xl pointer-events-none" />
+
+        {/* Top Header */}
+        <div className="max-w-6xl mx-auto w-full flex items-center justify-between z-10">
+          <div className="flex items-center gap-3">
+            <div className="w-11 h-11 rounded-xl bg-gradient-to-tr from-amber-500 via-rose-500 to-purple-600 flex items-center justify-center shadow-lg shadow-amber-500/20">
+              <Sparkles className="w-6 h-6 text-white" />
+            </div>
+            <div>
+              <h1 className="text-lg font-bold bg-clip-text text-transparent bg-gradient-to-r from-amber-300 via-rose-300 to-purple-300">
+                SC Dandiya 2026
+              </h1>
+              <p className="text-xs text-slate-400 font-medium">Auditor General & Security Portal</p>
+            </div>
+          </div>
+
+          <a
+            href="/verify"
+            target="_blank"
+            rel="noopener noreferrer"
+            className="flex items-center gap-1.5 px-3.5 py-2 rounded-xl bg-slate-900/90 hover:bg-slate-800 text-slate-300 border border-slate-700/80 text-xs font-semibold shadow-md transition"
+          >
+            <Shield className="w-3.5 h-3.5 text-amber-400" />
+            <span>QR Scanner Portal</span>
+            <ExternalLink className="w-3 h-3 text-slate-500" />
+          </a>
+        </div>
+
+        {/* Center Login Box */}
+        <div className="max-w-md mx-auto w-full my-auto py-10 z-10">
+          <div className="bg-slate-900/90 border border-amber-500/30 rounded-3xl p-8 shadow-2xl shadow-amber-500/10 backdrop-blur-xl relative overflow-hidden">
+            <div className="absolute top-0 right-0 w-32 h-32 bg-amber-500/10 rounded-full blur-2xl pointer-events-none" />
+            
+            <div className="text-center mb-8">
+              <div className="w-14 h-14 rounded-2xl bg-amber-500/10 border border-amber-500/30 flex items-center justify-center mx-auto mb-4 text-amber-400 shadow-inner">
+                <Lock className="w-7 h-7" />
+              </div>
+              <span className="inline-flex items-center gap-1.5 px-3 py-1 rounded-full text-xs font-bold bg-amber-500/15 text-amber-300 border border-amber-500/30 mb-2">
+                <ShieldCheck className="w-3.5 h-3.5 text-amber-400" /> Auditor General Access
+              </span>
+              <h2 className="text-2xl font-extrabold text-white">Sign In to Dashboard</h2>
+              <p className="text-xs text-slate-400 mt-1.5 leading-relaxed">
+                Authorized access required to view real-time statistics, pass sales, donations, division rankings, and import files.
+              </p>
+            </div>
+
+            {loginError && (
+              <div className="mb-6 p-4 rounded-xl bg-rose-500/15 border border-rose-500/30 text-rose-300 text-xs flex items-start gap-3">
+                <AlertCircle className="w-4 h-4 text-rose-400 shrink-0 mt-0.5" />
+                <div className="leading-relaxed">{loginError}</div>
+              </div>
+            )}
+
+            <form onSubmit={handleLogin} className="space-y-4">
+              <div>
+                <label className="block text-xs font-semibold text-slate-300 mb-1.5">
+                  Auditor Email Address
+                </label>
+                <div className="relative">
+                  <div className="absolute inset-y-0 left-0 pl-3.5 flex items-center pointer-events-none text-slate-500">
+                    <Mail className="w-4 h-4" />
+                  </div>
+                  <input
+                    type="email"
+                    required
+                    value={loginEmail}
+                    onChange={(e) => setLoginEmail(e.target.value)}
+                    placeholder="auditorgeneral.streetcausehyd@gmail.com"
+                    className="w-full pl-10 pr-4 py-2.5 bg-slate-950/80 border border-slate-800 rounded-xl text-xs text-white placeholder-slate-500 focus:outline-none focus:border-amber-400 focus:ring-1 focus:ring-amber-400 transition"
+                  />
+                </div>
+              </div>
+
+              <div>
+                <label className="block text-xs font-semibold text-slate-300 mb-1.5">
+                  Auditor Password
+                </label>
+                <div className="relative">
+                  <div className="absolute inset-y-0 left-0 pl-3.5 flex items-center pointer-events-none text-slate-500">
+                    <KeyRound className="w-4 h-4" />
+                  </div>
+                  <input
+                    type={showPassword ? 'text' : 'password'}
+                    required
+                    value={loginPassword}
+                    onChange={(e) => setLoginPassword(e.target.value)}
+                    placeholder="Enter security password"
+                    className="w-full pl-10 pr-10 py-2.5 bg-slate-950/80 border border-slate-800 rounded-xl text-xs text-white placeholder-slate-500 focus:outline-none focus:border-amber-400 focus:ring-1 focus:ring-amber-400 transition"
+                  />
+                  <button
+                    type="button"
+                    onClick={() => setShowPassword(!showPassword)}
+                    className="absolute inset-y-0 right-0 pr-3.5 flex items-center text-slate-500 hover:text-slate-300 transition"
+                  >
+                    {showPassword ? <EyeOff className="w-4 h-4" /> : <Eye className="w-4 h-4" />}
+                  </button>
+                </div>
+              </div>
+
+              <button
+                type="submit"
+                disabled={loginLoading}
+                className="w-full mt-2 py-3 px-4 rounded-xl bg-gradient-to-r from-amber-500 via-orange-500 to-rose-600 hover:from-amber-600 hover:to-rose-700 text-slate-950 font-extrabold text-xs shadow-lg shadow-amber-500/20 flex items-center justify-center gap-2 transition disabled:opacity-50"
+              >
+                {loginLoading ? (
+                  <>
+                    <RefreshCw className="w-4 h-4 animate-spin text-slate-950" />
+                    <span>Verifying Credentials...</span>
+                  </>
+                ) : (
+                  <>
+                    <Lock className="w-4 h-4" />
+                    <span>Authorize & Enter Dashboard</span>
+                  </>
+                )}
+              </button>
+            </form>
+
+            <div className="mt-6 pt-5 border-t border-slate-800 text-center">
+              <div className="flex items-center justify-center gap-2 text-[11px] text-slate-500">
+                <ShieldCheck className="w-3.5 h-3.5 text-emerald-400" />
+                <span>Protected by HMAC Sessions, In-Memory Rate Limiting & 60s Cache</span>
+              </div>
+            </div>
+          </div>
+        </div>
+
+        {/* Footer */}
+        <div className="max-w-6xl mx-auto w-full text-center text-xs text-slate-500 z-10">
+          SC Dandiya 2026 • Street Cause Auditor General System
+        </div>
+      </div>
+    );
+  }
 
   // EVENT SELECTION HUB MODAL / VIEW
   if (showEventHub || !selectedEvent) {
@@ -696,6 +970,17 @@ export default function Home() {
 
           {/* Right Actions: Backend Status & Refresh */}
           <div className="flex items-center gap-2.5">
+            {/* Cache Age Indicator */}
+            {isDataCached && (
+              <div
+                className="hidden lg:flex items-center gap-1.5 px-2.5 py-1 rounded-full text-[11px] font-semibold bg-slate-900 border border-slate-800 text-amber-300/90"
+                title={`Database data served from fast in-memory cache (${cacheAgeSeconds}s old). Click refresh to bust cache.`}
+              >
+                <Clock className="w-3 h-3 text-amber-400" />
+                <span>Cached ({cacheAgeSeconds}s)</span>
+              </div>
+            )}
+
             {/* Admin Verification Portal Button */}
             <a
               href="/verify"
@@ -705,7 +990,7 @@ export default function Home() {
               title="Open Organizer QR Verification Login"
             >
               <Shield className="w-3.5 h-3.5 text-white" />
-              <span>Admin Verification Login</span>
+              <span className="hidden sm:inline">Admin QR Scan</span>
             </a>
 
             {/* Supabase Status Badge */}
@@ -720,15 +1005,33 @@ export default function Home() {
               <span>{isSupabase ? 'Supabase Active' : 'Local DB Active'}</span>
             </div>
 
-            {/* Refresh Button */}
+            {/* Manual Refresh Button (Busts Cache) */}
             <button
-              onClick={() => refreshAll(selectedEvent)}
+              onClick={() => refreshAll(selectedEvent, true)}
               disabled={refreshing}
               className="p-2 rounded-lg bg-slate-900 hover:bg-slate-800 text-slate-300 border border-slate-800 transition disabled:opacity-50"
-              title="Refresh Data"
+              title="Refresh Data (Bypass Cache)"
             >
               <RefreshCw className={`w-4 h-4 ${refreshing ? 'animate-spin text-amber-400' : ''}`} />
             </button>
+
+            {/* Auditor Profile & Sign Out Button */}
+            <div className="flex items-center gap-1.5 pl-1 border-l border-slate-800">
+              <div
+                className="hidden xl:flex items-center gap-1.5 px-2.5 py-1 rounded-lg bg-amber-500/10 border border-amber-500/30 text-amber-300 text-xs font-semibold"
+                title={`Logged in as ${userEmail || 'Auditor General'}`}
+              >
+                <UserCheck className="w-3.5 h-3.5 text-amber-400" />
+                <span className="truncate max-w-[130px]">{userEmail || 'Auditor'}</span>
+              </div>
+              <button
+                onClick={handleLogout}
+                className="p-2 rounded-lg bg-rose-500/10 hover:bg-rose-500/20 text-rose-400 border border-rose-500/30 text-xs font-semibold transition"
+                title="Sign Out"
+              >
+                <LogOut className="w-4 h-4" />
+              </button>
+            </div>
           </div>
         </div>
       </header>
