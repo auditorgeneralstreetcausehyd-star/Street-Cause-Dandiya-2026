@@ -2,6 +2,7 @@ import * as XLSX from 'xlsx';
 import {
   createImportBatch,
   getExistingOrderIds,
+  getExistingRecordKeys,
   getSettings,
   insertEventRecords,
   updateImportBatch,
@@ -61,7 +62,7 @@ export async function analyzeExcelBuffer(
 ): Promise<PreImportAnalysis> {
   const rows = parseRawRows(buffer);
   const settings = getSettings();
-  const existingOrderIds = await getExistingOrderIds();
+  const existingRecordKeys = await getExistingRecordKeys();
 
   const acceptedStatuses = new Set(
     (settings.acceptedPaymentStatuses || ['captured', 'paid', 'success', 'successful', 'completed']).map((s) =>
@@ -88,7 +89,7 @@ export async function analyzeExcelBuffer(
   let unclassifiedRowsCount = 0;
 
   const warnings: string[] = [];
-  const fileOrderIds = new Set<string>();
+  const fileRecordKeys = new Set<string>();
   let duplicatesInFile = 0;
   let existingDuplicatesCount = 0;
 
@@ -151,31 +152,40 @@ export async function analyzeExcelBuffer(
       warnings.push(`Row ${i + 2} (${orderId}): Payment Page Title indicates event "${detectedEvent === 'navratri_utsav' ? 'Navratri Nirvana' : 'Garba Groove'}", but target event is "${targetEventId}".`);
     }
 
-    // Duplicate Check
+    // Classify Pass vs Donation
+    const lowerItem = itemName.toLowerCase();
+    const isPass = passKeywords.some((k) => lowerItem.includes(k));
+    const isDonation = donationKeywords.some((k) => lowerItem.includes(k));
+
+    if (!isPass && !isDonation) {
+      unclassifiedRowsCount++;
+      warnings.push(`Row ${i + 2} (${orderId}): Item name "${itemName}" could not be classified.`);
+      continue;
+    }
+
+    const recordType: RecordType = isPass ? 'PASS' : 'DONATION';
+    const dedupeKey = `${recordType}__${orderId}`;
+
+    // Duplicate Check scoped to record type & table (order_id can exist as both PASS and DONATION)
     let isDup = false;
-    if (fileOrderIds.has(orderId)) {
+    if (fileRecordKeys.has(dedupeKey)) {
       duplicatesInFile++;
       isDup = true;
     } else {
-      fileOrderIds.add(orderId);
+      fileRecordKeys.add(dedupeKey);
     }
 
-    if (existingOrderIds.has(orderId)) {
+    if (existingRecordKeys.has(dedupeKey)) {
       existingDuplicatesCount++;
       isDup = true;
     }
 
     if (isDup) {
       if (previewDuplicates.length < 10) {
-        previewDuplicates.push({ order_id: orderId, name, item_name: itemName });
+        previewDuplicates.push({ order_id: `${orderId} (${recordType})`, name, item_name: itemName });
       }
       continue;
     }
-
-    // Classify Pass vs Donation
-    const lowerItem = itemName.toLowerCase();
-    const isPass = passKeywords.some((k) => lowerItem.includes(k));
-    const isDonation = donationKeywords.some((k) => lowerItem.includes(k));
 
     const qty = parseInt(rawQty, 10);
     const validQty = isNaN(qty) || qty <= 0 ? 1 : qty;
@@ -183,7 +193,10 @@ export async function analyzeExcelBuffer(
       warnings.push(`Row ${i + 2} (${orderId}): Pass quantity missing or 0. Defaulted to 1.`);
     }
 
-    const itemAmt = parseFloat(rawItemAmt) || parseFloat(rawTotalAmt) || 0;
+    // Always read total_payment_amount first (as per Razorpay export format).
+    // Razorpay can put ₹1 marker in item_payment_amount, while real donation is in total_payment_amount.
+    const totalAmt = parseFloat(rawTotalAmt) || parseFloat(rawItemAmt) || 0;
+    const itemAmt = parseFloat(rawItemAmt) || totalAmt;
 
     if (isPass) {
       passTransactions++;
@@ -202,7 +215,7 @@ export async function analyzeExcelBuffer(
       }
     } else if (isDonation) {
       donationTransactions++;
-      totalDonationAmount += itemAmt;
+      totalDonationAmount += totalAmt;
       if (previewDonations.length < 5) {
         previewDonations.push({
           order_id: orderId,
@@ -211,7 +224,7 @@ export async function analyzeExcelBuffer(
           email,
           item_name: itemName,
           item_quantity: validQty,
-          item_payment_amount: itemAmt,
+          item_payment_amount: totalAmt,
           divisions,
         });
       }
@@ -268,7 +281,7 @@ export async function processAndImportExcel(
   const analysis = await analyzeExcelBuffer(buffer, fileName, targetEventId);
   const rows = parseRawRows(buffer);
   const settings = getSettings();
-  const existingOrderIds = await getExistingOrderIds();
+  const existingRecordKeys = await getExistingRecordKeys();
 
   const batchEventId = analysis.eventId || targetEventId;
   const batchEventName = batchEventId === 'navratri_utsav' ? 'Navratri Nirvana 2026' : 'Garba Groove 2026';
@@ -327,12 +340,6 @@ export async function processAndImportExcel(
     if (!status || !acceptedStatuses.has(status)) continue;
     if (!orderId) continue;
 
-    // Duplicate prevention
-    if (existingOrderIds.has(orderId) || seenInBatch.has(orderId)) {
-      continue;
-    }
-    seenInBatch.add(orderId);
-
     const lowerItem = itemName.toLowerCase();
     const isPass = passKeywords.some((k) => lowerItem.includes(k));
     const isDonation = donationKeywords.some((k) => lowerItem.includes(k));
@@ -341,12 +348,21 @@ export async function processAndImportExcel(
       continue;
     }
 
+    const recordType: RecordType = isPass ? 'PASS' : 'DONATION';
+    const dedupeKey = `${recordType}__${orderId}`;
+
+    // Duplicate prevention scoped to record type & table (order_id can exist in both pass and donation tables)
+    if (existingRecordKeys.has(dedupeKey) || seenInBatch.has(dedupeKey)) {
+      continue;
+    }
+    seenInBatch.add(dedupeKey);
+
     const qty = parseInt(rawQty, 10);
     const validQty = isNaN(qty) || qty <= 0 ? 1 : qty;
-    const itemAmt = parseFloat(rawItemAmt) || parseFloat(rawTotalAmt) || 0;
-    const totalAmt = parseFloat(rawTotalAmt) || itemAmt * validQty;
-
-    const recordType: RecordType = isPass ? 'PASS' : 'DONATION';
+    // Always read total_payment_amount first (as per Razorpay export format).
+    // Razorpay can put ₹1 marker in item_payment_amount, while real donation is in total_payment_amount.
+    const totalAmt = parseFloat(rawTotalAmt) || parseFloat(rawItemAmt) || 0;
+    const itemAmt = parseFloat(rawItemAmt) || totalAmt;
 
     // Per-row event classification validation
     const rowDetectedEvent = classifyEventFromTitle(paymentPageTitle) || batchEventId;

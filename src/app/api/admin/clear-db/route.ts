@@ -5,9 +5,10 @@ export async function POST() {
   try {
     const result = await clearDatabase();
     return NextResponse.json(result);
-  } catch (error: any) {
+  } catch (error: unknown) {
+    const message = error instanceof Error ? error.message : 'Failed to clear database';
     return NextResponse.json(
-      { success: false, error: error.message || 'Failed to clear database' },
+      { success: false, error: message },
       { status: 500 }
     );
   }
@@ -17,9 +18,10 @@ export async function GET() {
   try {
     const result = await clearDatabase();
     return NextResponse.json(result);
-  } catch (error: any) {
+  } catch (error: unknown) {
+    const message = error instanceof Error ? error.message : 'Failed to clear database';
     return NextResponse.json(
-      { success: false, error: error.message || 'Failed to clear database' },
+      { success: false, error: message },
       { status: 500 }
     );
   }

@@ -49,8 +49,9 @@ export async function POST(request: Request) {
       results
     });
 
-  } catch (error: any) {
+  } catch (error: unknown) {
+    const message = error instanceof Error ? error.message : 'Internal server error';
     console.error('Email API error:', error);
-    return NextResponse.json({ success: false, error: error.message || 'Internal server error' }, { status: 500 });
+    return NextResponse.json({ success: false, error: message }, { status: 500 });
   }
 }

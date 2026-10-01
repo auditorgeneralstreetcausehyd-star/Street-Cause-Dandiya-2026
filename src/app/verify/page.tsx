@@ -1,6 +1,7 @@
 'use client';
+/* eslint-disable react-hooks/set-state-in-effect */
 
-import React, { useState, useEffect, Suspense } from 'react';
+import React, { useState, useEffect, Suspense, useCallback } from 'react';
 import { useSearchParams } from 'next/navigation';
 
 interface PassRecord {
@@ -13,6 +14,7 @@ interface PassRecord {
   item_name: string;
   item_quantity: number;
   item_payment_amount: number;
+  total_payment_amount?: number;
   payment_status: string;
   divisions: string;
   l2: string;
@@ -24,49 +26,21 @@ function VerifyContent() {
   const searchParams = useSearchParams();
   const code = searchParams.get('code') || '';
 
-  const [passcode, setPasscode] = useState('');
-  const [isAuthenticated, setIsAuthenticated] = useState(false);
+  const [passcode, setPasscode] = useState<string>(() => {
+    if (typeof window === 'undefined') return '';
+    return window.localStorage.getItem('sc_admin_passcode') ?? '';
+  });
+  const [isAuthenticated, setIsAuthenticated] = useState<boolean>(() => {
+    if (typeof window === 'undefined') return false;
+    return Boolean(window.localStorage.getItem('sc_admin_passcode'));
+  });
   const [record, setRecord] = useState<PassRecord | null>(null);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [actionSuccess, setActionSuccess] = useState<string | null>(null);
   const [updating, setUpdating] = useState(false);
 
-  // Check saved admin passcode in localStorage
-  useEffect(() => {
-    const savedCode = localStorage.getItem('sc_admin_passcode');
-    if (savedCode) {
-      setPasscode(savedCode);
-      setIsAuthenticated(true);
-    }
-  }, []);
-
-  // Fetch record when authenticated and code is present
-  useEffect(() => {
-    if (isAuthenticated && code) {
-      fetchPassRecord();
-    }
-  }, [isAuthenticated, code]);
-
-  const handleLogin = (e: React.FormEvent) => {
-    e.preventDefault();
-    if (!passcode.trim()) {
-      setError('Please enter the Admin Passcode');
-      return;
-    }
-    localStorage.setItem('sc_admin_passcode', passcode.trim());
-    setIsAuthenticated(true);
-    setError(null);
-  };
-
-  const handleLogout = () => {
-    localStorage.removeItem('sc_admin_passcode');
-    setIsAuthenticated(false);
-    setRecord(null);
-    setPasscode('');
-  };
-
-  const fetchPassRecord = async () => {
+  const fetchPassRecord = useCallback(async () => {
     if (!code) return;
     setLoading(true);
     setError(null);
@@ -92,11 +66,37 @@ function VerifyContent() {
       } else {
         setRecord(data.record);
       }
-    } catch (err: any) {
-      setError(err.message || 'Failed to connect to verification server.');
+    } catch (err: unknown) {
+      const message = err instanceof Error ? err.message : 'Failed to connect to verification server.';
+      setError(message);
     } finally {
       setLoading(false);
     }
+  }, [code, passcode]);
+
+  // Fetch record when authenticated and code is present
+  useEffect(() => {
+    if (isAuthenticated && code) {
+      void fetchPassRecord();
+    }
+  }, [isAuthenticated, code, fetchPassRecord]);
+
+  const handleLogin = (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!passcode.trim()) {
+      setError('Please enter the Admin Passcode');
+      return;
+    }
+    localStorage.setItem('sc_admin_passcode', passcode.trim());
+    setIsAuthenticated(true);
+    setError(null);
+  };
+
+  const handleLogout = () => {
+    localStorage.removeItem('sc_admin_passcode');
+    setIsAuthenticated(false);
+    setRecord(null);
+    setPasscode('');
   };
 
   const handleUpdateStatus = async (newStatus: 'PRESENT' | 'CANCELLED') => {
@@ -134,8 +134,9 @@ function VerifyContent() {
           setRecord({ ...record, attendance_status: newStatus });
         }
       }
-    } catch (err: any) {
-      setError(err.message || 'Failed to process request.');
+    } catch (err: unknown) {
+      const message = err instanceof Error ? err.message : 'Failed to process request.';
+      setError(message);
     } finally {
       setUpdating(false);
     }
@@ -264,8 +265,9 @@ function VerifyContent() {
                     } else {
                       setError(data.error || 'Failed to create test record');
                     }
-                  } catch (e: any) {
-                    setError(e.message);
+                  } catch (e: unknown) {
+                    const message = e instanceof Error ? e.message : 'Failed to create test record';
+                    setError(message);
                   } finally {
                     setLoading(false);
                   }
@@ -330,7 +332,7 @@ function VerifyContent() {
 
                 <div className="bg-slate-950/50 p-4 rounded-xl border border-slate-800/80">
                   <span className="text-xs uppercase font-bold text-slate-400 block mb-1">Amount Paid</span>
-                  <span className="text-emerald-400 font-bold text-lg">₹{record.item_payment_amount}/-</span>
+                  <span className="text-emerald-400 font-bold text-lg">₹{record.total_payment_amount || record.item_payment_amount}/-</span>
                 </div>
 
                 <div className="bg-slate-950/50 p-4 rounded-xl border border-slate-800/80">

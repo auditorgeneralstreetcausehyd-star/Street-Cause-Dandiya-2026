@@ -34,7 +34,8 @@ export async function GET(request: NextRequest) {
         phone: record.phone || 'N/A',
         item_name: record.item_name || 'Event Pass',
         item_quantity: record.item_quantity || 1,
-        item_payment_amount: record.item_payment_amount || record.item_amount || 0,
+        item_payment_amount: record.total_payment_amount || record.item_payment_amount || record.item_amount || 0,
+        total_payment_amount: record.total_payment_amount || record.item_payment_amount || record.item_amount || 0,
         payment_status: record.payment_status || 'Paid',
         divisions: record.divisions || 'N/A',
         l2: record.l2 || 'N/A',
@@ -43,9 +44,10 @@ export async function GET(request: NextRequest) {
         created_at: record.created_at,
       },
     });
-  } catch (err: any) {
+  } catch (err: unknown) {
+    const message = err instanceof Error ? err.message : 'Internal Server Error';
     console.error('Verify API GET error:', err);
-    return NextResponse.json({ success: false, error: err.message || 'Internal Server Error' }, { status: 500 });
+    return NextResponse.json({ success: false, error: message }, { status: 500 });
   }
 }
 
@@ -74,8 +76,9 @@ export async function POST(request: NextRequest) {
       message: `Pass status updated to ${status} successfully!`,
       record: result.record,
     });
-  } catch (err: any) {
+  } catch (err: unknown) {
+    const message = err instanceof Error ? err.message : 'Internal Server Error';
     console.error('Verify API POST error:', err);
-    return NextResponse.json({ success: false, error: err.message || 'Internal Server Error' }, { status: 500 });
+    return NextResponse.json({ success: false, error: message }, { status: 500 });
   }
 }

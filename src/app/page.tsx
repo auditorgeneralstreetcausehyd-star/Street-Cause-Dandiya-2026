@@ -1,4 +1,5 @@
 'use client';
+/* eslint-disable react-hooks/set-state-in-effect */
 
 import React, { useState, useEffect, useCallback, useRef } from 'react';
 import {
@@ -42,7 +43,7 @@ import {
   Link as LinkIcon,
   Save
 } from 'lucide-react';
-import { DashboardStats, ImportBatch, EventRecord, PreImportAnalysis, EventId, DayWiseStat, VolunteerStat, DivisionStats } from '@/lib/types';
+import { DashboardStats, ImportBatch, EventRecord, PreImportAnalysis, EventId, DayWiseStat, VolunteerStat, DivisionStats, SystemSettings } from '@/lib/types';
 
 interface EventMeta {
   id: 'garba_groove' | 'navratri_utsav';
@@ -117,7 +118,7 @@ export default function Home() {
   const [analysis, setAnalysis] = useState<PreImportAnalysis | null>(null);
   const [importing, setImporting] = useState<boolean>(false);
   const [importSuccess, setImportSuccess] = useState<boolean>(false);
-  const [importResult, setImportResult] = useState<{ batch: ImportBatch; syncResult: any } | null>(null);
+  const [importResult, setImportResult] = useState<{ batch: ImportBatch; syncResult: unknown } | null>(null);
   const [uploadError, setUploadError] = useState<string | null>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
 
@@ -208,58 +209,67 @@ export default function Home() {
 
   const handleSendEmails = async (orderIds: string[]) => {
     if (orderIds.length === 0) return;
-    
+
+    type EmailDispatchResult = { orderId: string; status: string; error?: string };
+
     setEmailSending(true);
-    
+
     try {
       const res = await fetch('/api/email', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ orderIds, eventId: selectedEvent })
       });
-      
+
       const data = await res.json();
-      
+
       if (data.success && data.results) {
         setEmailResults(prev => {
           const next = new Map(prev);
-          data.results.forEach((r: any) => {
+          (data.results as EmailDispatchResult[]).forEach((r) => {
             next.set(r.orderId, { status: r.status, error: r.error });
           });
           return next;
         });
-        
+
         // Deselect successful ones
         setSelectedPassIds(prev => {
           const next = new Set(prev);
-          data.results.forEach((r: any) => {
+          (data.results as EmailDispatchResult[]).forEach((r) => {
             if (r.status === 'Sent') next.delete(r.orderId);
           });
           return next;
         });
-        
+
         // Refresh passes to update status in DB
         await fetchPasses(passSearch, passDivisionFilter, selectedEvent);
 
         if (data.failed > 0) {
-          const sampleError = data.results.find((r: any) => r.error)?.error || 'Unknown error';
+          const sampleError = (data.results as EmailDispatchResult[]).find((r) => r.error)?.error || 'Unknown error';
           alert(`Email Dispatch Result:\n✓ Sent: ${data.sent}\n✗ Failed: ${data.failed}\n\nReason for failure:\n${sampleError}`);
         }
       } else {
         alert(`Failed to send emails: ${data.error || 'Server error'}`);
       }
-    } catch (err: any) {
-      alert(`Error sending emails: ${err.message || 'Unknown network error'}`);
+    } catch (err: unknown) {
+      const message = err instanceof Error ? err.message : 'Unknown network error';
+      alert(`Error sending emails: ${message}`);
     } finally {
       setEmailSending(false);
     }
   };
 
   // System Backend Info State
-  const [systemSettings, setSystemSettings] = useState<any>({
+  const [systemSettings, setSystemSettings] = useState<SystemSettings>({
     storageMode: 'auto',
     googleSheetsMode: 'mock',
     googleSpreadsheetId: '',
+    garbaGrooveSpreadsheetId: '',
+    navratriUtsavSpreadsheetId: '',
+    navratriPassBgUrl: 'https://res.cloudinary.com/dhrj3rpg8/image/upload/v1789971984/EVENT_PASS.png',
+    acceptedPaymentStatuses: ['captured', 'paid', 'success', 'successful', 'completed'],
+    passKeywords: ['pass', 'ticket', 'entry', 'single', 'couple', 'vip', 'garba', 'dandiya'],
+    donationKeywords: ['donation', 'donate', 'daan', 'seva', 'contribut', 'sponsorship', 'support'],
   });
 
   // Fetch Dashboard Stats & Batches for Active Event
@@ -279,7 +289,7 @@ export default function Home() {
     } finally {
       setRefreshing(false);
     }
-  }, []);
+  }, [setSystemSettings]);
 
   // Fetch Import History
   const fetchBatches = useCallback(async (eventId?: EventId | null) => {
@@ -351,7 +361,7 @@ export default function Home() {
 
   useEffect(() => {
     if (selectedEvent) {
-      refreshAll(selectedEvent);
+      void refreshAll(selectedEvent);
       if (selectedEvent !== 'all') {
         setUploadTargetEvent(selectedEvent as 'garba_groove' | 'navratri_utsav');
       }
@@ -2090,7 +2100,7 @@ export default function Home() {
                         <td className="py-3 px-4 font-mono text-slate-300">{rec.pan_number || '-'}</td>
                         <td className="py-3 px-4 text-slate-200">{rec.item_name}</td>
                         <td className="py-3 px-4 font-bold text-rose-400">
-                          ₹{Number(rec.item_payment_amount).toLocaleString()}
+                          ₹{Number(rec.total_payment_amount || rec.item_payment_amount || 0).toLocaleString()}
                         </td>
                         <td className="py-3 px-4">
                           <span className="px-2 py-0.5 rounded-md text-[11px] bg-slate-800 text-slate-300">
@@ -2231,8 +2241,9 @@ export default function Home() {
                       } else {
                         alert(`Error saving settings: ${data.error}`);
                       }
-                    } catch (err: any) {
-                      alert(`Network error saving settings: ${err.message}`);
+                    } catch (err: unknown) {
+                      const message = err instanceof Error ? err.message : 'Network error saving settings';
+                      alert(`Network error saving settings: ${message}`);
                     }
                   }}
                   className="px-4 py-2 rounded-xl bg-gradient-to-r from-amber-500 to-amber-600 hover:from-amber-400 hover:to-amber-500 text-slate-950 font-bold text-xs transition-all flex items-center gap-1.5"

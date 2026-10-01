@@ -103,7 +103,7 @@ export function generatePassEmailHTML(record: EventRecord): string {
   const mobile = record.phone || '';
   const email = record.email || '';
   const admits = record.item_quantity || 1;
-  const amount = `${record.item_payment_amount || record.item_amount || 0}/-`;
+  const amount = `${record.total_payment_amount || record.item_payment_amount || record.item_amount || 0}/-`;
   const l1Name = record.divisions || '';
   const l2Name = record.l2 || '';
 
@@ -276,9 +276,10 @@ export async function sendPassEmail(record: EventRecord): Promise<{ success: boo
     });
 
     return { success: true };
-  } catch (error: any) {
+  } catch (error: unknown) {
+    const message = error instanceof Error ? error.message : 'Unknown SMTP error';
     console.error(`Failed to send email to ${record.email}:`, error);
-    return { success: false, error: error.message || 'Unknown SMTP error' };
+    return { success: false, error: message };
   }
 }
 

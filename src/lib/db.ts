@@ -188,15 +188,16 @@ export async function testSupabaseConnection(overrideUrl?: string, overrideKey?:
   }
 }
 
-// Helper: Determine target table name for an event
-export function getRecordTableName(eventId?: string): string {
-  if (eventId === 'navratri_utsav') return 'navratri_utsav_records';
-  if (eventId === 'garba_groove') return 'garba_groove_records';
-  return 'event_records';
+// Helper: Determine target table name for an event and record type
+export function getRecordTableName(eventId?: string, recordType: 'PASS' | 'DONATION' = 'PASS'): string {
+  if (eventId === 'navratri_utsav') {
+    return recordType === 'DONATION' ? 'navratri_utsav_donations' : 'navratri_utsav_passes';
+  }
+  return recordType === 'DONATION' ? 'garba_groove_donations' : 'garba_groove_passes';
 }
 
 // Helper to fetch ALL rows from a Supabase table handling PostgREST 1000-row pagination limit
-async function fetchAllFromSupabase<T = any>(
+async function fetchAllFromSupabase<T = Record<string, unknown>>(
   client: SupabaseClient,
   tableName: string,
   selectFields: string = '*'
@@ -217,32 +218,58 @@ async function fetchAllFromSupabase<T = any>(
   return all;
 }
 
-// Check existing order_ids across all event tables for deduplication
-export async function getExistingOrderIds(): Promise<Set<string>> {
+// Check existing order_ids scoped by event and record type (PASS or DONATION) across 4 tables.
+// Keys are stored as both `eventId__TYPE__orderId` (for insert deduplication)
+// and `TYPE__orderId` (for backwards-compat in analyzeExcelBuffer).
+export async function getExistingRecordKeys(): Promise<Set<string>> {
   const client = getSupabaseClient();
   if (isUsingSupabase() && client) {
     try {
-      const ids = new Set<string>();
+      const keys = new Set<string>();
 
-      // Fetch from both separate tables in parallel with full pagination
-      const [garbaRows, navratriRows, legacyRows] = await Promise.all([
-        fetchAllFromSupabase<{ order_id: string }>(client, 'garba_groove_records', 'order_id'),
-        fetchAllFromSupabase<{ order_id: string }>(client, 'navratri_utsav_records', 'order_id'),
-        fetchAllFromSupabase<{ order_id: string }>(client, 'event_records', 'order_id'),
+      // Fetch order_ids from all 4 active tables in parallel
+      const [ggPasses, ggDonations, nuPasses, nuDonations] = await Promise.all([
+        fetchAllFromSupabase<{ order_id: string }>(client, 'garba_groove_passes', 'order_id'),
+        fetchAllFromSupabase<{ order_id: string }>(client, 'garba_groove_donations', 'order_id'),
+        fetchAllFromSupabase<{ order_id: string }>(client, 'navratri_utsav_passes', 'order_id'),
+        fetchAllFromSupabase<{ order_id: string }>(client, 'navratri_utsav_donations', 'order_id'),
       ]);
 
-      if (garbaRows) garbaRows.forEach((r) => ids.add(r.order_id));
-      if (navratriRows) navratriRows.forEach((r) => ids.add(r.order_id));
-      if (legacyRows) legacyRows.forEach((r) => ids.add(r.order_id));
+      ggPasses.forEach((r) => {
+        keys.add(`garba_groove__PASS__${r.order_id}`);
+        keys.add(`PASS__${r.order_id}`);
+      });
+      ggDonations.forEach((r) => {
+        keys.add(`garba_groove__DONATION__${r.order_id}`);
+        keys.add(`DONATION__${r.order_id}`);
+      });
+      nuPasses.forEach((r) => {
+        keys.add(`navratri_utsav__PASS__${r.order_id}`);
+        keys.add(`PASS__${r.order_id}`);
+      });
+      nuDonations.forEach((r) => {
+        keys.add(`navratri_utsav__DONATION__${r.order_id}`);
+        keys.add(`DONATION__${r.order_id}`);
+      });
 
-      return ids;
+      return keys;
     } catch (err) {
-      console.warn('Supabase getExistingOrderIds error, falling back to local store:', err);
+      console.warn('Supabase getExistingRecordKeys error, falling back to local store:', err);
     }
   }
 
   const local = readLocalDb();
-  return new Set(local.records.map((r) => r.order_id));
+  return new Set(local.records.map((r) => `${r.event_id || 'garba_groove'}__${r.record_type || 'PASS'}__${r.order_id}`));
+}
+
+export async function getExistingOrderIds(): Promise<Set<string>> {
+  const keys = await getExistingRecordKeys();
+  const ids = new Set<string>();
+  keys.forEach((k) => {
+    const parts = k.split('__');
+    ids.add(parts[parts.length - 1]);
+  });
+  return ids;
 }
 
 // Insert Import Batch
@@ -283,8 +310,12 @@ export async function updateImportBatch(id: string, updates: Partial<ImportBatch
   }
 }
 
-// Helper: Bulk insert records into a specific table with fallback
-async function bulkInsertToTable(client: SupabaseClient, tableName: string, records: EventRecord[]): Promise<number> {
+// Helper: Bulk insert records into a specific table
+async function bulkInsertToTable(
+  client: SupabaseClient,
+  tableName: string,
+  records: EventRecord[]
+): Promise<number> {
   if (records.length === 0) return 0;
   const chunkSize = 100;
   let count = 0;
@@ -297,14 +328,8 @@ async function bulkInsertToTable(client: SupabaseClient, tableName: string, reco
 
     const { error } = await client.from(tableName).insert(chunk);
     if (error) {
-      // If separate table fails (e.g. table not created yet), fallback to event_records
-      if (tableName !== 'event_records') {
-        console.warn(`Insert to ${tableName} failed (${error.message}), falling back to event_records`);
-        const { error: fallbackErr } = await client.from('event_records').insert(chunk);
-        if (fallbackErr) throw fallbackErr;
-      } else {
-        throw error;
-      }
+      console.error(`Insert to ${tableName} failed: ${error.message}`);
+      throw error;
     }
     count += chunk.length;
   }
@@ -312,11 +337,11 @@ async function bulkInsertToTable(client: SupabaseClient, tableName: string, reco
 }
 
 // Insert Event Records into their respective event table with duplicate avoidance
-export async function insertEventRecords(records: EventRecord[]): Promise<{ inserted: number; skipped: number; errors: any[] }> {
+export async function insertEventRecords(records: EventRecord[]): Promise<{ inserted: number; skipped: number; errors: Array<{ row: number; error: string }> }> {
   if (records.length === 0) return { inserted: 0, skipped: 0, errors: [] };
 
-  const existingIds = await getExistingOrderIds();
-  const toInsert = records.filter((r) => !existingIds.has(r.order_id));
+  const existingKeys = await getExistingRecordKeys();
+  const toInsert = records.filter((r) => !existingKeys.has(`${r.event_id || 'garba_groove'}__${r.record_type || 'PASS'}__${r.order_id}`));
   const skipped = records.length - toInsert.length;
 
   if (toInsert.length === 0) {
@@ -326,16 +351,20 @@ export async function insertEventRecords(records: EventRecord[]): Promise<{ inse
   const client = getSupabaseClient();
   if (isUsingSupabase() && client) {
     try {
-      // Group records by target table
-      const garbaRecords = toInsert.filter(r => r.event_id !== 'navratri_utsav');
-      const navratriRecords = toInsert.filter(r => r.event_id === 'navratri_utsav');
+      // Group records into 4 separate buckets:
+      const garbaPasses = toInsert.filter(r => r.event_id !== 'navratri_utsav' && r.record_type === 'PASS');
+      const garbaDonations = toInsert.filter(r => r.event_id !== 'navratri_utsav' && r.record_type === 'DONATION');
+      const navratriPasses = toInsert.filter(r => r.event_id === 'navratri_utsav' && r.record_type === 'PASS');
+      const navratriDonations = toInsert.filter(r => r.event_id === 'navratri_utsav' && r.record_type === 'DONATION');
 
-      const [garbaCount, navratriCount] = await Promise.all([
-        bulkInsertToTable(client, 'garba_groove_records', garbaRecords),
-        bulkInsertToTable(client, 'navratri_utsav_records', navratriRecords),
+      const [gpCount, gdCount, npCount, ndCount] = await Promise.all([
+        bulkInsertToTable(client, 'garba_groove_passes', garbaPasses),
+        bulkInsertToTable(client, 'garba_groove_donations', garbaDonations),
+        bulkInsertToTable(client, 'navratri_utsav_passes', navratriPasses),
+        bulkInsertToTable(client, 'navratri_utsav_donations', navratriDonations),
       ]);
 
-      return { inserted: garbaCount + navratriCount, skipped, errors: [] };
+      return { inserted: gpCount + gdCount + npCount + ndCount, skipped, errors: [] };
     } catch (err) {
       console.warn('Supabase bulk insert failed, storing locally:', err);
     }
@@ -452,7 +481,7 @@ export function computeDayWiseStats(records: EventRecord[]): DayWiseStat[] {
       divEntry.passTransactions++;
       divEntry.totalPasses += qty;
     } else if (r.record_type === 'DONATION') {
-      const amt = Number(r.item_payment_amount) || 0;
+      const amt = Number(r.total_payment_amount) || Number(r.item_payment_amount) || 0;
       day.donationTransactions++;
       day.totalDonationAmount += amt;
       divEntry.donationTransactions++;
@@ -565,7 +594,7 @@ export function computeDivisionStats(records: EventRecord[]): DivisionStats[] {
       vol.passTransactions++;
       dayItem.passes += qty;
     } else if (r.record_type === 'DONATION') {
-      const amt = Number(r.item_payment_amount) || 0;
+      const amt = Number(r.total_payment_amount) || Number(r.item_payment_amount) || 0;
       item.donationTransactions++;
       item.totalDonationAmount += amt;
       vol.donations += amt;
@@ -615,37 +644,32 @@ export function computeDivisionStats(records: EventRecord[]): DivisionStats[] {
   return result.sort((a, b) => b.totalPasses - a.totalPasses || b.totalDonationAmount - a.totalDonationAmount);
 }
 
-// Fetch all records from Supabase tables dynamically with full pagination
+// Fetch all records from the 4 active Supabase tables with full pagination
 async function fetchSupabaseRecords(client: SupabaseClient, eventId?: string): Promise<EventRecord[]> {
   if (eventId === 'garba_groove') {
-    const data = await fetchAllFromSupabase<EventRecord>(client, 'garba_groove_records');
-    if (data && data.length > 0) return data;
-    // Fallback to event_records view
-    const viewData = await fetchAllFromSupabase<EventRecord>(client, 'event_records');
-    return viewData.filter((r) => r.event_id === 'garba_groove');
+    const [passes, donations] = await Promise.all([
+      fetchAllFromSupabase<EventRecord>(client, 'garba_groove_passes'),
+      fetchAllFromSupabase<EventRecord>(client, 'garba_groove_donations'),
+    ]);
+    return [...passes, ...donations];
   }
 
   if (eventId === 'navratri_utsav') {
-    const data = await fetchAllFromSupabase<EventRecord>(client, 'navratri_utsav_records');
-    if (data && data.length > 0) return data;
-    // Fallback to event_records view
-    const viewData = await fetchAllFromSupabase<EventRecord>(client, 'event_records');
-    return viewData.filter((r) => r.event_id === 'navratri_utsav');
+    const [passes, donations] = await Promise.all([
+      fetchAllFromSupabase<EventRecord>(client, 'navratri_utsav_passes'),
+      fetchAllFromSupabase<EventRecord>(client, 'navratri_utsav_donations'),
+    ]);
+    return [...passes, ...donations];
   }
 
-  // Event ID is 'all' or unspecified -> fetch from all tables
-  const [garbaData, navratriData, legacyData] = await Promise.all([
-    fetchAllFromSupabase<EventRecord>(client, 'garba_groove_records'),
-    fetchAllFromSupabase<EventRecord>(client, 'navratri_utsav_records'),
-    fetchAllFromSupabase<EventRecord>(client, 'event_records'),
+  // 'all' or unspecified: fetch from all 4 tables
+  const [ggPasses, ggDonations, nuPasses, nuDonations] = await Promise.all([
+    fetchAllFromSupabase<EventRecord>(client, 'garba_groove_passes'),
+    fetchAllFromSupabase<EventRecord>(client, 'garba_groove_donations'),
+    fetchAllFromSupabase<EventRecord>(client, 'navratri_utsav_passes'),
+    fetchAllFromSupabase<EventRecord>(client, 'navratri_utsav_donations'),
   ]);
-
-  const recordMap = new Map<string, EventRecord>();
-  if (garbaData) garbaData.forEach((r) => recordMap.set(r.order_id, r));
-  if (navratriData) navratriData.forEach((r) => recordMap.set(r.order_id, r));
-  if (legacyData) legacyData.forEach((r) => { if (!recordMap.has(r.order_id)) recordMap.set(r.order_id, r); });
-
-  return Array.from(recordMap.values());
+  return [...ggPasses, ...ggDonations, ...nuPasses, ...nuDonations];
 }
 
 // Get Dashboard Statistics with Event Scope, Division Breakdown & Day-Wise Analytics
@@ -669,7 +693,7 @@ export async function getDashboardStats(eventId?: string): Promise<DashboardStat
       const totalCapturedPasses = passes.reduce((acc, curr) => acc + (Number(curr.item_quantity) || 1), 0);
       const passTransactions = passes.length;
       const capturedDonations = donations.length;
-      const totalDonationAmount = donations.reduce((acc, curr) => acc + (Number(curr.item_payment_amount) || 0), 0);
+      const totalDonationAmount = donations.reduce((acc, curr) => acc + (Number(curr.total_payment_amount) || Number(curr.item_payment_amount) || 0), 0);
 
       const divisionStats = computeDivisionStats(records);
       const dayWiseStats = computeDayWiseStats(records);
@@ -705,7 +729,7 @@ export async function getDashboardStats(eventId?: string): Promise<DashboardStat
   const totalCapturedPasses = passes.reduce((acc, curr) => acc + (Number(curr.item_quantity) || 1), 0);
   const passTransactions = passes.length;
   const capturedDonations = donations.length;
-  const totalDonationAmount = donations.reduce((acc, curr) => acc + (Number(curr.item_payment_amount) || 0), 0);
+  const totalDonationAmount = donations.reduce((acc, curr) => acc + (Number(curr.total_payment_amount) || Number(curr.item_payment_amount) || 0), 0);
 
   const divisionStats = computeDivisionStats(records);
   const dayWiseStats = computeDayWiseStats(records);
@@ -816,15 +840,16 @@ export async function getRecordsByOrderIds(orderIds: string[]): Promise<EventRec
   return local.records.filter((r) => orderIds.includes(r.order_id));
 }
 
-// Update Email Status
+// Update Email Status across all 4 active tables
 export async function updateRecordEmailStatus(orderId: string, status: 'Pending' | 'Sent' | 'Failed', sentAt: string | null = null): Promise<void> {
   const client = getSupabaseClient();
   if (isUsingSupabase() && client) {
     try {
       await Promise.allSettled([
-        client.from('garba_groove_records').update({ email_status: status, email_sent_at: sentAt }).eq('order_id', orderId),
-        client.from('navratri_utsav_records').update({ email_status: status, email_sent_at: sentAt }).eq('order_id', orderId),
-        client.from('event_records').update({ email_status: status, email_sent_at: sentAt }).eq('order_id', orderId),
+        client.from('garba_groove_passes').update({ email_status: status, email_sent_at: sentAt }).eq('order_id', orderId),
+        client.from('garba_groove_donations').update({ email_status: status, email_sent_at: sentAt }).eq('order_id', orderId),
+        client.from('navratri_utsav_passes').update({ email_status: status, email_sent_at: sentAt }).eq('order_id', orderId),
+        client.from('navratri_utsav_donations').update({ email_status: status, email_sent_at: sentAt }).eq('order_id', orderId),
       ]);
     } catch (err) {
       console.warn('Supabase updateRecordEmailStatus error:', err);
@@ -947,7 +972,8 @@ export async function updateAttendanceStatus(
       );
 
       if (target) {
-        const targetTable = getRecordTableName(target.event_id);
+        // Resolve exact table from event_id + record_type
+        const targetTable = getRecordTableName(target.event_id, target.record_type as 'PASS' | 'DONATION' || 'PASS');
 
         const { data, error } = await client
           .from(targetTable)
@@ -959,19 +985,13 @@ export async function updateAttendanceStatus(
           return { success: true, record: data[0] as EventRecord };
         }
 
-        // Fallback update on event_records
-        const { data: fallbackData, error: fallbackErr } = await client
-          .from('event_records')
-          .update({ attendance_status: status, checked_in_at: checkedInAt })
-          .eq('id', target.id)
-          .select();
-
-        if (!fallbackErr && fallbackData && fallbackData.length > 0) {
-          return { success: true, record: fallbackData[0] as EventRecord };
+        if (error) {
+          console.warn(`updateAttendanceStatus failed on ${targetTable}: ${error.message}`);
         }
       }
-    } catch (err: any) {
-      console.warn('Supabase updateAttendanceStatus error, updating locally:', err?.message);
+    } catch (err: unknown) {
+      const message = err instanceof Error ? err.message : 'Supabase updateAttendanceStatus error';
+      console.warn('Supabase updateAttendanceStatus error, updating locally:', message);
     }
   }
 
@@ -1002,17 +1022,19 @@ export async function clearDatabase(): Promise<{ success: boolean; message: stri
   if (isUsingSupabase() && client) {
     try {
       await Promise.allSettled([
-        client.from('garba_groove_records').delete().neq('id', '00000000-0000-0000-0000-000000000000'),
-        client.from('navratri_utsav_records').delete().neq('id', '00000000-0000-0000-0000-000000000000'),
-        client.from('event_records').delete().neq('id', '00000000-0000-0000-0000-000000000000'),
+        client.from('garba_groove_passes').delete().neq('id', '00000000-0000-0000-0000-000000000000'),
+        client.from('garba_groove_donations').delete().neq('id', '00000000-0000-0000-0000-000000000000'),
+        client.from('navratri_utsav_passes').delete().neq('id', '00000000-0000-0000-0000-000000000000'),
+        client.from('navratri_utsav_donations').delete().neq('id', '00000000-0000-0000-0000-000000000000'),
         client.from('import_batches').delete().neq('id', '00000000-0000-0000-0000-000000000000'),
         client.from('import_errors').delete().neq('id', '00000000-0000-0000-0000-000000000000'),
       ]);
       supabaseCleared = true;
-      supabaseMsg = 'Supabase tables (garba_groove_records, navratri_utsav_records, import_batches, import_errors) cleared successfully.';
-    } catch (err: any) {
+      supabaseMsg = 'Supabase tables (passes, donations, import_batches, import_errors) cleared successfully.';
+    } catch (err: unknown) {
+      const message = err instanceof Error ? err.message : 'Failed to clear Supabase';
       console.error('Failed to clear Supabase:', err);
-      supabaseMsg = `Supabase clear notice: ${err.message}`;
+      supabaseMsg = `Supabase clear notice: ${message}`;
     }
   }
 

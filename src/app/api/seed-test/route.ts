@@ -52,7 +52,8 @@ export async function GET(req: NextRequest) {
       record: testRecord,
       verifyUrl: `/verify?code=${encodeURIComponent(passCode)}`,
     });
-  } catch (err: any) {
-    return NextResponse.json({ success: false, error: err.message }, { status: 500 });
+  } catch (err: unknown) {
+    const message = err instanceof Error ? err.message : 'Failed to create test pass';
+    return NextResponse.json({ success: false, error: message }, { status: 500 });
   }
 }
