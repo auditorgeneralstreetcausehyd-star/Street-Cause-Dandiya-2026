@@ -1,6 +1,7 @@
 import { createClient, SupabaseClient } from '@supabase/supabase-js';
 import fs from 'fs';
 import path from 'path';
+import os from 'os';
 import {
   DashboardStats,
   DayDivisionStat,
@@ -25,9 +26,10 @@ const DEFAULT_SETTINGS: SystemSettings = {
   navratriPassBgUrl: 'https://res.cloudinary.com/dhrj3rpg8/image/upload/v1789971984/EVENT_PASS.png',
 };
 
-// Local database file path
+// Local database file path & fallback
 const DATA_DIR = path.join(process.cwd(), 'data');
 const LOCAL_DB_PATH = path.join(DATA_DIR, 'local_db.json');
+const TMP_DB_PATH = path.join(os.tmpdir(), 'sc_dandiya_local_db.json');
 
 interface LocalDatabase {
   batches: ImportBatch[];
@@ -36,58 +38,104 @@ interface LocalDatabase {
   settings: SystemSettings;
 }
 
-function ensureDataDir(): void {
-  if (!fs.existsSync(DATA_DIR)) {
-    fs.mkdirSync(DATA_DIR, { recursive: true });
+let inMemoryDb: LocalDatabase | null = null;
+
+function safeWriteFile(filePath: string, content: string): boolean {
+  try {
+    const dir = path.dirname(filePath);
+    if (!fs.existsSync(dir)) {
+      fs.mkdirSync(dir, { recursive: true });
+    }
+    fs.writeFileSync(filePath, content, 'utf-8');
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+function getDbFilePath(): string {
+  try {
+    if (!fs.existsSync(DATA_DIR)) {
+      fs.mkdirSync(DATA_DIR, { recursive: true });
+    }
+    return LOCAL_DB_PATH;
+  } catch {
+    return TMP_DB_PATH;
   }
 }
 
 function readLocalDb(): LocalDatabase {
-  ensureDataDir();
-  if (!fs.existsSync(LOCAL_DB_PATH)) {
-    const initial: LocalDatabase = {
-      batches: [],
-      records: [],
-      errors: [],
-      settings: DEFAULT_SETTINGS,
-    };
-    fs.writeFileSync(LOCAL_DB_PATH, JSON.stringify(initial, null, 2), 'utf-8');
-    return initial;
+  if (inMemoryDb) {
+    return inMemoryDb;
   }
-  try {
-    const content = fs.readFileSync(LOCAL_DB_PATH, 'utf-8');
-    const parsed = JSON.parse(content);
-    let modified = false;
-    if (Array.isArray(parsed.batches)) {
-      for (const b of parsed.batches) {
-        if (!b.event_id) {
-          b.event_id = 'garba_groove';
-          b.event_name = 'Garba Groove 2026';
-          modified = true;
-        }
+
+  const initial: LocalDatabase = {
+    batches: [],
+    records: [],
+    errors: [],
+    settings: DEFAULT_SETTINGS,
+  };
+
+  let db: LocalDatabase = initial;
+  const pathsToTry = [LOCAL_DB_PATH, TMP_DB_PATH];
+
+  for (const p of pathsToTry) {
+    try {
+      if (fs.existsSync(/*turbopackIgnore: true*/ p)) {
+        const content = fs.readFileSync(/*turbopackIgnore: true*/ p, 'utf-8');
+        const parsed = JSON.parse(content);
+        db = {
+          batches: Array.isArray(parsed.batches) ? parsed.batches : [],
+          records: Array.isArray(parsed.records) ? parsed.records : [],
+          errors: Array.isArray(parsed.errors) ? parsed.errors : [],
+          settings: { ...DEFAULT_SETTINGS, ...(parsed.settings || {}) },
+        };
+        break;
+      }
+    } catch {
+      // Continue to next fallback
+    }
+  }
+
+  let modified = false;
+  if (Array.isArray(db.batches)) {
+    for (const b of db.batches) {
+      if (!b.event_id) {
+        b.event_id = 'garba_groove';
+        b.event_name = 'Garba Groove 2026';
+        modified = true;
       }
     }
-    if (Array.isArray(parsed.records)) {
-      for (const r of parsed.records) {
-        if (!r.event_id) {
-          r.event_id = 'garba_groove';
-          r.event_name = 'Garba Groove 2026';
-          modified = true;
-        }
+  }
+  if (Array.isArray(db.records)) {
+    for (const r of db.records) {
+      if (!r.event_id) {
+        r.event_id = 'garba_groove';
+        r.event_name = 'Garba Groove 2026';
+        modified = true;
       }
     }
-    if (modified) {
-      fs.writeFileSync(LOCAL_DB_PATH, JSON.stringify(parsed, null, 2), 'utf-8');
-    }
-    return parsed;
-  } catch {
-    return { batches: [], records: [], errors: [], settings: DEFAULT_SETTINGS };
   }
+
+  inMemoryDb = db;
+
+  const targetPath = getDbFilePath();
+  if (modified || !fs.existsSync(targetPath)) {
+    if (!safeWriteFile(targetPath, JSON.stringify(db, null, 2))) {
+      safeWriteFile(TMP_DB_PATH, JSON.stringify(db, null, 2));
+    }
+  }
+
+  return inMemoryDb;
 }
 
 function writeLocalDb(data: LocalDatabase): void {
-  ensureDataDir();
-  fs.writeFileSync(LOCAL_DB_PATH, JSON.stringify(data, null, 2), 'utf-8');
+  inMemoryDb = data;
+  const targetPath = getDbFilePath();
+  const success = safeWriteFile(targetPath, JSON.stringify(data, null, 2));
+  if (!success && targetPath !== TMP_DB_PATH) {
+    safeWriteFile(TMP_DB_PATH, JSON.stringify(data, null, 2));
+  }
 }
 
 // Get Supabase Client if configured
