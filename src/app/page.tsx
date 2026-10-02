@@ -49,7 +49,27 @@ import {
   UserCheck,
   ShieldCheck
 } from 'lucide-react';
-import { DashboardStats, ImportBatch, EventRecord, PreImportAnalysis, EventId, DayWiseStat, VolunteerStat, DivisionStats, SystemSettings } from '@/lib/types';
+import { DashboardStats, ImportBatch, EventRecord, PreImportAnalysis, EventId, DayWiseStat, HourlyStat, VolunteerStat, DivisionStats, SystemSettings } from '@/lib/types';
+
+const ALL_HOURS_META = Array.from({ length: 24 }, (_, h) => {
+  const startPeriod = h >= 12 ? 'PM' : 'AM';
+  const startH12 = h % 12 === 0 ? 12 : h % 12;
+  const startStr = `${String(startH12).padStart(2, '0')}:00 ${startPeriod}`;
+  const startShort = `${String(startH12).padStart(2, '0')} ${startPeriod}`;
+
+  const nextH = (h + 1) % 24;
+  const nextPeriod = nextH >= 12 ? 'PM' : 'AM';
+  const nextH12 = nextH % 12 === 0 ? 12 : nextH % 12;
+  const nextStr = `${String(nextH12).padStart(2, '0')}:00 ${nextPeriod}`;
+
+  return {
+    hour: h,
+    key: String(h),
+    hourLabel: startShort,
+    hourDisplay: `${startStr} - ${nextStr}`,
+    isoHour: String(h).padStart(2, '0'),
+  };
+});
 
 interface EventMeta {
   id: 'garba_groove' | 'navratri_utsav';
@@ -124,6 +144,7 @@ export default function Home() {
   const [divisionSearch, setDivisionSearch] = useState<string>('');
   const [divisionSortBy, setDivisionSortBy] = useState<'passes' | 'donations' | 'total'>('passes');
   const [selectedDateFilter, setSelectedDateFilter] = useState<string>('all');
+  const [selectedHourFilter, setSelectedHourFilter] = useState<string>('all');
   const [divisionViewMode, setDivisionViewMode] = useState<'cards' | 'l1_volunteers' | 'daywise_timeline'>('cards');
   const [expandedDivisionVolunteers, setExpandedDivisionVolunteers] = useState<string | null>(null);
   const [volunteerSearch, setVolunteerSearch] = useState<string>('');
@@ -409,13 +430,15 @@ export default function Home() {
   }, []);
 
   // Fetch Passes (load all matching records for full selection)
-  const fetchPasses = useCallback(async (search = '', division = 'all', eventId?: EventId | null) => {
+  const fetchPasses = useCallback(async (search = '', division = 'all', eventId?: EventId | null, date = 'all', hour = 'all') => {
     try {
       const params = new URLSearchParams();
       params.set('type', 'PASS');
       if (search) params.set('search', search);
       if (division && division !== 'all') params.set('division', division);
       if (eventId && eventId !== 'all') params.set('eventId', eventId);
+      if (date && date !== 'all') params.set('date', date);
+      if (hour && hour !== 'all') params.set('hour', hour);
       params.set('limit', '5000');
 
       const res = await fetch(`/api/records?${params.toString()}`);
@@ -433,12 +456,14 @@ export default function Home() {
   }, []);
 
   // Fetch Donations (load all matching records)
-  const fetchDonations = useCallback(async (search = '', eventId?: EventId | null) => {
+  const fetchDonations = useCallback(async (search = '', eventId?: EventId | null, date = 'all', hour = 'all') => {
     try {
       const params = new URLSearchParams();
       params.set('type', 'DONATION');
       if (search) params.set('search', search);
       if (eventId && eventId !== 'all') params.set('eventId', eventId);
+      if (date && date !== 'all') params.set('date', date);
+      if (hour && hour !== 'all') params.set('hour', hour);
       params.set('limit', '5000');
 
       const res = await fetch(`/api/records?${params.toString()}`);
@@ -462,12 +487,12 @@ export default function Home() {
       await Promise.all([
         fetchStats(eventId, forceRefresh),
         fetchBatches(eventId),
-        fetchPasses(passSearch, passDivisionFilter, eventId),
-        fetchDonations(donationSearch, eventId),
+        fetchPasses(passSearch, passDivisionFilter, eventId, selectedDateFilter, selectedHourFilter),
+        fetchDonations(donationSearch, eventId, selectedDateFilter, selectedHourFilter),
       ]);
       setLoading(false);
     },
-    [fetchStats, fetchBatches, fetchPasses, fetchDonations, passSearch, passDivisionFilter, donationSearch]
+    [fetchStats, fetchBatches, fetchPasses, fetchDonations, passSearch, passDivisionFilter, donationSearch, selectedDateFilter, selectedHourFilter]
   );
 
   useEffect(() => {
@@ -478,6 +503,14 @@ export default function Home() {
       }
     }
   }, [isAuthenticated, selectedEvent, refreshAll]);
+
+  // When date or hour filter changes, re-query passes and donations
+  useEffect(() => {
+    if (isAuthenticated && selectedEvent) {
+      void fetchPasses(passSearch, passDivisionFilter, selectedEvent, selectedDateFilter, selectedHourFilter);
+      void fetchDonations(donationSearch, selectedEvent, selectedDateFilter, selectedHourFilter);
+    }
+  }, [isAuthenticated, selectedEvent, selectedDateFilter, selectedHourFilter, passSearch, passDivisionFilter, donationSearch, fetchPasses, fetchDonations]);
 
   // Stage 1: Analyze File on Select
   const handleFileSelect = async (e: React.ChangeEvent<HTMLInputElement>) => {
@@ -554,12 +587,35 @@ export default function Home() {
     if (fileInputRef.current) fileInputRef.current.value = '';
   };
 
-  // Filtered divisions list based on date selection
+  // Filtered divisions list based on date & hour selection
   const activeDayStat = selectedDateFilter !== 'all'
     ? stats?.dayWiseStats?.find((d) => d.date === selectedDateFilter)
     : null;
 
-  const rawDivisionList: DivisionStats[] = activeDayStat
+  const activeHourlyList: HourlyStat[] = (activeDayStat ? activeDayStat.hourlyStats : stats?.hourlyStats) || [];
+
+  const activeHourStat = selectedHourFilter !== 'all'
+    ? activeHourlyList.find((h) => String(h.hour) === selectedHourFilter)
+    : null;
+
+  const rawDivisionList: DivisionStats[] = activeHourStat
+    ? activeHourStat.divisionStats.map((d) => {
+        const fullDiv = stats?.divisionStats?.find((s) => s.division === d.division);
+        return {
+          division: d.division,
+          passTransactions: d.passTransactions,
+          totalPasses: d.totalPasses,
+          donationTransactions: d.donationTransactions,
+          totalDonationAmount: d.totalDonationAmount,
+          totalRevenue: d.totalRevenue,
+          totalTransactions: d.totalTransactions,
+          volunteersCount: fullDiv?.volunteersCount || 0,
+          topVolunteers: fullDiv?.topVolunteers || [],
+          allVolunteers: fullDiv?.allVolunteers || [],
+          dayWiseTrend: fullDiv?.dayWiseTrend || [],
+        };
+      })
+    : activeDayStat
     ? activeDayStat.divisionStats.map((d) => {
         const fullDiv = stats?.divisionStats?.find((s) => s.division === d.division);
         return {
@@ -590,6 +646,38 @@ export default function Home() {
 
   // Available unique dates
   const availableDates = stats?.dayWiseStats || [];
+
+  // Filtered totals for cards
+  const displayTotalPasses = activeHourStat
+    ? activeHourStat.totalPasses
+    : activeDayStat
+    ? activeDayStat.totalPasses
+    : stats?.totalCapturedPasses || 0;
+
+  const displayPassTransactions = activeHourStat
+    ? activeHourStat.passTransactions
+    : activeDayStat
+    ? activeDayStat.passTransactions
+    : stats?.passTransactions || 0;
+
+  const displayTotalDonations = activeHourStat
+    ? activeHourStat.totalDonationAmount
+    : activeDayStat
+    ? activeDayStat.totalDonationAmount
+    : stats?.totalDonationAmount || 0;
+
+  const displayDonationTransactions = activeHourStat
+    ? activeHourStat.donationTransactions
+    : activeDayStat
+    ? activeDayStat.donationTransactions
+    : stats?.capturedDonations || 0;
+
+  const peakHour = activeHourlyList.reduce<HourlyStat | null>((max, curr) => {
+    if (!max || curr.totalTransactions > max.totalTransactions) {
+      return curr.totalTransactions > 0 ? curr : null;
+    }
+    return max;
+  }, null);
 
   // AUTHENTICATION CHECKING LOADING SCREEN
   if (authLoading) {
@@ -1166,23 +1254,86 @@ export default function Home() {
         {/* 1. OVERVIEW DASHBOARD TAB */}
         {activeTab === 'dashboard' && (
           <div className="space-y-6">
+            {/* Global Date & Hourly Filter Ribbon */}
+            <div className="bg-slate-900/90 border border-slate-800 p-4 rounded-2xl flex flex-col md:flex-row md:items-center justify-between gap-4">
+              <div className="flex items-center gap-2 flex-wrap">
+                <span className="text-xs font-bold text-slate-300 flex items-center gap-1.5 mr-1">
+                  <Filter className="w-3.5 h-3.5 text-amber-400" /> Filter Time Scope:
+                </span>
+                
+                {/* Date Dropdown */}
+                <select
+                  value={selectedDateFilter}
+                  onChange={(e) => setSelectedDateFilter(e.target.value)}
+                  className="px-3 py-1.5 rounded-xl bg-slate-950 border border-slate-800 text-xs text-slate-200 font-semibold focus:outline-none focus:border-amber-500"
+                >
+                  <option value="all">📅 All Dates (Overall)</option>
+                  {availableDates.map((day) => (
+                    <option key={day.date} value={day.date}>
+                      📅 {day.displayDate} ({day.totalPasses} passes)
+                    </option>
+                  ))}
+                </select>
+
+                {/* Hourly Filter Dropdown */}
+                <select
+                  value={selectedHourFilter}
+                  onChange={(e) => setSelectedHourFilter(e.target.value)}
+                  className="px-3 py-1.5 rounded-xl bg-slate-950 border border-slate-800 text-xs text-amber-300 font-semibold focus:outline-none focus:border-amber-500"
+                >
+                  <option value="all">⏰ All Hours (24 Hours)</option>
+                  {ALL_HOURS_META.map((meta) => {
+                    const hStat = activeHourlyList.find((h) => h.hour === meta.hour);
+                    const txCount = hStat ? hStat.totalTransactions : 0;
+                    return (
+                      <option key={meta.key} value={meta.key}>
+                        ⏰ {meta.hourDisplay} {txCount > 0 ? `(${txCount} txns)` : ''}
+                      </option>
+                    );
+                  })}
+                </select>
+
+                {(selectedDateFilter !== 'all' || selectedHourFilter !== 'all') && (
+                  <button
+                    onClick={() => {
+                      setSelectedDateFilter('all');
+                      setSelectedHourFilter('all');
+                    }}
+                    className="px-3 py-1.5 rounded-xl text-xs font-bold bg-rose-500/15 text-rose-300 border border-rose-500/30 hover:bg-rose-500/20 transition flex items-center gap-1"
+                  >
+                    <X className="w-3.5 h-3.5" /> Clear Filters
+                  </button>
+                )}
+              </div>
+
+              {/* Active Filter Pill */}
+              <div className="text-xs text-slate-400 flex items-center gap-2">
+                <span className="inline-block w-2 h-2 rounded-full bg-emerald-400 animate-pulse" />
+                <span>
+                  {selectedDateFilter === 'all' && selectedHourFilter === 'all'
+                    ? 'Displaying all-time metrics'
+                    : `Filtered: ${selectedDateFilter !== 'all' ? activeDayStat?.displayDate : 'All Days'} • ${selectedHourFilter !== 'all' ? ALL_HOURS_META[Number(selectedHourFilter)]?.hourDisplay : '24h'}`}
+                </span>
+              </div>
+            </div>
+
             {/* Realtime KPI Stat Cards */}
             <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
               {/* Total Passes */}
               <div className="bg-slate-900/90 border border-slate-800 hover:border-amber-500/40 rounded-2xl p-5 transition shadow-lg relative overflow-hidden group">
                 <div className="flex items-center justify-between mb-3">
                   <span className="text-xs font-semibold text-slate-400 uppercase tracking-wider">
-                    Total Passes Sold
+                    {selectedHourFilter !== 'all' || selectedDateFilter !== 'all' ? 'Filtered Passes Sold' : 'Total Passes Sold'}
                   </span>
                   <div className="w-9 h-9 rounded-xl bg-amber-500/10 text-amber-400 flex items-center justify-center">
                     <Ticket className="w-5 h-5" />
                   </div>
                 </div>
                 <div className="text-3xl font-extrabold text-white tracking-tight">
-                  {stats ? stats.totalCapturedPasses.toLocaleString() : '0'}
+                  {displayTotalPasses.toLocaleString()}
                 </div>
                 <p className="text-xs text-slate-400 mt-1">
-                  from <span className="text-slate-200 font-bold">{stats?.passTransactions || 0}</span> captured transactions
+                  from <span className="text-slate-200 font-bold">{displayPassTransactions}</span> captured transactions
                 </p>
                 <div className="mt-3 pt-3 border-t border-slate-800/80 flex items-center justify-between text-[11px] text-amber-400/90">
                   <span>Target Google Sheet: PASS</span>
@@ -1194,17 +1345,17 @@ export default function Home() {
               <div className="bg-slate-900/90 border border-slate-800 hover:border-rose-500/40 rounded-2xl p-5 transition shadow-lg relative overflow-hidden group">
                 <div className="flex items-center justify-between mb-3">
                   <span className="text-xs font-semibold text-slate-400 uppercase tracking-wider">
-                    Total Donations Collected
+                    {selectedHourFilter !== 'all' || selectedDateFilter !== 'all' ? 'Filtered Donations' : 'Total Donations Collected'}
                   </span>
                   <div className="w-9 h-9 rounded-xl bg-rose-500/10 text-rose-400 flex items-center justify-center">
                     <Heart className="w-5 h-5" />
                   </div>
                 </div>
                 <div className="text-3xl font-extrabold text-white tracking-tight">
-                  ₹{stats ? stats.totalDonationAmount.toLocaleString() : '0'}
+                  ₹{displayTotalDonations.toLocaleString()}
                 </div>
                 <p className="text-xs text-slate-400 mt-1">
-                  from <span className="text-slate-200 font-bold">{stats?.capturedDonations || 0}</span> donor contributions
+                  from <span className="text-slate-200 font-bold">{displayDonationTransactions}</span> donor contributions
                 </p>
                 <div className="mt-3 pt-3 border-t border-slate-800/80 flex items-center justify-between text-[11px] text-rose-400/90">
                   <span>Target Google Sheet: DONATION</span>
@@ -1223,7 +1374,7 @@ export default function Home() {
                   </div>
                 </div>
                 <div className="text-3xl font-extrabold text-white tracking-tight">
-                  {stats?.divisionStats ? stats.divisionStats.length : 0}
+                  {rawDivisionList.length}
                 </div>
                 <p className="text-xs text-slate-400 mt-1">
                   across <span className="text-purple-300 font-semibold">{stats?.dayWiseStats?.length || 0} active days</span>
@@ -1252,9 +1403,85 @@ export default function Home() {
                   across <span className="text-slate-200 font-bold">{batches.length}</span> batch uploads
                 </p>
                 <div className="mt-3 pt-3 border-t border-slate-800/80 flex items-center justify-between text-[11px] text-emerald-400/90">
-                  <span>order_id deduplication active</span>
+                  <span>per-table sorting active</span>
                   <Check className="w-3.5 h-3.5 text-emerald-400" />
                 </div>
+              </div>
+            </div>
+
+            {/* 24-HOUR TRANSACTION VELOCITY & HOURLY BREAKDOWN */}
+            <div className="bg-slate-900/90 border border-slate-800 rounded-2xl p-6">
+              <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 mb-5">
+                <div>
+                  <h3 className="text-base font-bold text-white flex items-center gap-2">
+                    <Clock className="w-4 h-4 text-amber-400" /> 24-Hour Velocity & Hourly Ingestion Breakdown
+                  </h3>
+                  <p className="text-xs text-slate-400">
+                    Explore transaction activity for every hour of the day. Click any hour to filter the entire dashboard.
+                  </p>
+                </div>
+
+                {peakHour && (
+                  <div className="flex items-center gap-2 px-3 py-1.5 rounded-xl bg-amber-500/15 border border-amber-500/30 text-amber-300 text-xs font-bold">
+                    <Flame className="w-4 h-4 text-amber-400" />
+                    <span>Peak Hour: {peakHour.hourDisplay} ({peakHour.totalPasses} passes • ₹{peakHour.totalDonationAmount.toLocaleString()})</span>
+                  </div>
+                )}
+              </div>
+
+              {/* Hourly Matrix Cards */}
+              <div className="grid grid-cols-2 sm:grid-cols-4 md:grid-cols-6 lg:grid-cols-8 gap-2.5">
+                {ALL_HOURS_META.map((meta) => {
+                  const hStat = activeHourlyList.find((h) => h.hour === meta.hour);
+                  const passesSold = hStat?.totalPasses || 0;
+                  const donationsAmt = hStat?.totalDonationAmount || 0;
+                  const txCount = hStat?.totalTransactions || 0;
+                  const isSelected = selectedHourFilter === meta.key;
+                  const isPeak = peakHour && peakHour.hour === meta.hour && txCount > 0;
+
+                  return (
+                    <button
+                      key={meta.key}
+                      onClick={() => setSelectedHourFilter(isSelected ? 'all' : meta.key)}
+                      className={`p-3 rounded-xl border text-left transition relative overflow-hidden flex flex-col justify-between ${
+                        isSelected
+                          ? 'bg-amber-500/20 border-amber-400 shadow-md shadow-amber-500/20 ring-1 ring-amber-400'
+                          : txCount > 0
+                          ? 'bg-slate-950/80 border-slate-800 hover:border-slate-700'
+                          : 'bg-slate-950/40 border-slate-900 opacity-60 hover:opacity-100 hover:border-slate-800'
+                      }`}
+                    >
+                      {isPeak && (
+                        <div className="absolute top-1 right-1 text-[10px]" title="Peak velocity hour">
+                          🔥
+                        </div>
+                      )}
+                      <div>
+                        <div className="text-[11px] font-bold text-slate-300 mb-1 flex items-center justify-between">
+                          <span>{meta.hourLabel}</span>
+                          {txCount > 0 && (
+                            <span className="text-[9px] font-mono px-1 py-0.5 rounded bg-slate-800 text-amber-300">
+                              {txCount} tx
+                            </span>
+                          )}
+                        </div>
+                        <div className="text-xs font-extrabold text-white">
+                          {passesSold} <span className="text-[10px] font-normal text-slate-400">passes</span>
+                        </div>
+                      </div>
+
+                      {donationsAmt > 0 && (
+                        <div className="text-[10px] font-semibold text-rose-400 mt-1">
+                          +₹{donationsAmt.toLocaleString()}
+                        </div>
+                      )}
+
+                      <div className="text-[9px] text-slate-500 mt-1">
+                        {meta.hourDisplay.split(' - ')[0]}
+                      </div>
+                    </button>
+                  );
+                })}
               </div>
             </div>
 
@@ -1445,38 +1672,56 @@ export default function Home() {
               </div>
             </div>
 
-            {/* Date Filter Bar */}
+            {/* Date & Hourly Filter Bar */}
             <div className="bg-slate-900/60 border border-slate-800/80 p-4 rounded-2xl flex flex-col md:flex-row md:items-center justify-between gap-4">
               <div className="flex items-center gap-2 flex-wrap">
                 <span className="text-xs font-bold text-slate-400 flex items-center gap-1.5 mr-1">
-                  <Filter className="w-3.5 h-3.5 text-amber-400" /> Filter by Date:
+                  <Filter className="w-3.5 h-3.5 text-amber-400" /> Filter:
                 </span>
-                <button
-                  onClick={() => setSelectedDateFilter('all')}
-                  className={`px-3 py-1 rounded-lg text-xs font-bold transition ${
-                    selectedDateFilter === 'all'
-                      ? 'bg-amber-500 text-slate-950 shadow-md'
-                      : 'bg-slate-950 text-slate-400 hover:text-slate-200 border border-slate-800'
-                  }`}
+                
+                {/* Date Dropdown */}
+                <select
+                  value={selectedDateFilter}
+                  onChange={(e) => setSelectedDateFilter(e.target.value)}
+                  className="px-3 py-1.5 rounded-xl bg-slate-950 border border-slate-800 text-xs text-slate-200 font-semibold focus:outline-none focus:border-amber-500"
                 >
-                  🌐 Overall (All Days)
-                </button>
-                {availableDates.map((day) => (
+                  <option value="all">📅 All Dates (Overall)</option>
+                  {availableDates.map((day) => (
+                    <option key={day.date} value={day.date}>
+                      📅 {day.displayDate} ({day.totalPasses} passes)
+                    </option>
+                  ))}
+                </select>
+
+                {/* Hourly Filter Dropdown */}
+                <select
+                  value={selectedHourFilter}
+                  onChange={(e) => setSelectedHourFilter(e.target.value)}
+                  className="px-3 py-1.5 rounded-xl bg-slate-950 border border-slate-800 text-xs text-amber-300 font-semibold focus:outline-none focus:border-amber-500"
+                >
+                  <option value="all">⏰ All Hours (24h)</option>
+                  {ALL_HOURS_META.map((meta) => {
+                    const hStat = activeHourlyList.find((h) => h.hour === meta.hour);
+                    const txCount = hStat ? hStat.totalTransactions : 0;
+                    return (
+                      <option key={meta.key} value={meta.key}>
+                        ⏰ {meta.hourDisplay} {txCount > 0 ? `(${txCount} txns)` : ''}
+                      </option>
+                    );
+                  })}
+                </select>
+
+                {(selectedDateFilter !== 'all' || selectedHourFilter !== 'all') && (
                   <button
-                    key={day.date}
-                    onClick={() => setSelectedDateFilter(day.date)}
-                    className={`px-3 py-1 rounded-lg text-xs font-semibold flex items-center gap-1.5 transition ${
-                      selectedDateFilter === day.date
-                        ? 'bg-amber-500 text-slate-950 font-bold shadow-md'
-                        : 'bg-slate-950 text-slate-400 hover:text-slate-200 border border-slate-800'
-                    }`}
+                    onClick={() => {
+                      setSelectedDateFilter('all');
+                      setSelectedHourFilter('all');
+                    }}
+                    className="px-2.5 py-1 rounded-lg text-xs font-bold bg-rose-500/15 text-rose-300 border border-rose-500/30 hover:bg-rose-500/20 transition flex items-center gap-1"
                   >
-                    📅 {day.displayDate}
-                    <span className="text-[10px] px-1 py-0.2 rounded bg-slate-800 text-slate-300">
-                      {day.totalPasses}p
-                    </span>
+                    <X className="w-3 h-3" /> Clear
                   </button>
-                ))}
+                )}
               </div>
 
               {/* Search & Sort Controls */}
@@ -1514,33 +1759,36 @@ export default function Home() {
               </div>
             </div>
 
-            {/* Selected Date Summary Banner (if a single date is picked) */}
-            {activeDayStat && (
+            {/* Selected Scope Summary Banner (if a date or hour is picked) */}
+            {(activeDayStat || activeHourStat) && (
               <div className="bg-amber-500/10 border border-amber-500/30 rounded-2xl p-4 flex flex-col sm:flex-row sm:items-center justify-between gap-3 text-amber-300">
                 <div className="flex items-center gap-2">
-                  <Calendar className="w-5 h-5 text-amber-400" />
+                  <Clock className="w-5 h-5 text-amber-400" />
                   <div>
                     <span className="font-bold text-sm text-white">
-                      Showing Statistics for {activeDayStat.displayDate} Only
+                      Showing Filtered Performance: {activeDayStat ? activeDayStat.displayDate : 'All Days'} {activeHourStat ? `• ${ALL_HOURS_META[Number(selectedHourFilter)]?.hourDisplay}` : ''}
                     </span>
                     <p className="text-[11px] text-amber-400/80">
-                      {activeDayStat.totalTransactions} transactions recorded across {activeDayStat.divisionStats.length} divisions
+                      {activeHourStat ? `${activeHourStat.totalTransactions} transactions across ${activeHourStat.divisionStats.length} divisions` : `${activeDayStat?.totalTransactions} transactions recorded across ${activeDayStat?.divisionStats.length} divisions`}
                     </p>
                   </div>
                 </div>
                 <div className="flex items-center gap-4 text-xs">
                   <div>
-                    <span className="text-slate-400">Day Passes: </span>
-                    <strong className="text-white font-extrabold text-sm">{activeDayStat.totalPasses}</strong>
+                    <span className="text-slate-400">Passes: </span>
+                    <strong className="text-white font-extrabold text-sm">{displayTotalPasses}</strong>
                   </div>
                   <div>
-                    <span className="text-slate-400">Day Donations: </span>
+                    <span className="text-slate-400">Donations: </span>
                     <strong className="text-rose-400 font-extrabold text-sm">
-                      ₹{activeDayStat.totalDonationAmount.toLocaleString()}
+                      ₹{displayTotalDonations.toLocaleString()}
                     </strong>
                   </div>
                   <button
-                    onClick={() => setSelectedDateFilter('all')}
+                    onClick={() => {
+                      setSelectedDateFilter('all');
+                      setSelectedHourFilter('all');
+                    }}
                     className="text-xs text-amber-400 hover:text-amber-200 underline font-semibold ml-2"
                   >
                     Reset to Overall
@@ -2165,29 +2413,102 @@ export default function Home() {
         {/* 4. PASS RECORDS TAB */}
         {activeTab === 'passes' && (
           <div className="space-y-4">
-            <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 bg-slate-900/90 border border-slate-800 p-4 rounded-2xl">
+            <div className="flex flex-col lg:flex-row lg:items-center justify-between gap-4 bg-slate-900/90 border border-slate-800 p-4 rounded-2xl">
               <div>
                 <h3 className="text-base font-bold text-white flex items-center gap-2">
                   <Ticket className="w-4 h-4 text-amber-400" /> Captured Pass Transactions
                 </h3>
                 <p className="text-xs text-slate-400">
-                  Showing all attendee pass orders destined for ticket generation
+                  Showing all attendee pass orders ({passes.length} loaded records)
                 </p>
               </div>
 
-              {/* Search */}
-              <div className="relative">
-                <Search className="w-4 h-4 absolute left-3 top-1/2 -translate-y-1/2 text-slate-400" />
-                <input
-                  type="text"
-                  placeholder="Search order ID, name, volunteer, division..."
-                  value={passSearch}
+              {/* Filters Toolbar */}
+              <div className="flex flex-wrap items-center gap-2.5">
+                {/* Search */}
+                <div className="relative">
+                  <Search className="w-4 h-4 absolute left-3 top-1/2 -translate-y-1/2 text-slate-400" />
+                  <input
+                    type="text"
+                    placeholder="Search order ID, attendee, email..."
+                    value={passSearch}
+                    onChange={(e) => {
+                      setPassSearch(e.target.value);
+                      void fetchPasses(e.target.value, passDivisionFilter, selectedEvent, selectedDateFilter, selectedHourFilter);
+                    }}
+                    className="pl-9 pr-4 py-1.5 rounded-xl bg-slate-950 border border-slate-800 text-xs text-slate-200 placeholder-slate-500 focus:outline-none focus:border-amber-500 w-48 sm:w-60"
+                  />
+                </div>
+
+                {/* Division Filter */}
+                <select
+                  value={passDivisionFilter}
                   onChange={(e) => {
-                    setPassSearch(e.target.value);
-                    fetchPasses(e.target.value, passDivisionFilter, selectedEvent);
+                    setPassDivisionFilter(e.target.value);
+                    void fetchPasses(passSearch, e.target.value, selectedEvent, selectedDateFilter, selectedHourFilter);
                   }}
-                  className="pl-9 pr-4 py-2 rounded-xl bg-slate-950 border border-slate-800 text-xs text-slate-200 placeholder-slate-500 focus:outline-none focus:border-amber-500 w-full sm:w-72"
-                />
+                  className="px-2.5 py-1.5 rounded-xl bg-slate-950 border border-slate-800 text-xs text-slate-300 focus:outline-none focus:border-amber-500"
+                >
+                  <option value="all">🏢 All Divisions</option>
+                  {(stats?.divisionStats || []).map((d) => (
+                    <option key={d.division} value={d.division}>
+                      {d.division} ({d.totalPasses}p)
+                    </option>
+                  ))}
+                </select>
+
+                {/* Date Dropdown */}
+                <select
+                  value={selectedDateFilter}
+                  onChange={(e) => {
+                    setSelectedDateFilter(e.target.value);
+                    void fetchPasses(passSearch, passDivisionFilter, selectedEvent, e.target.value, selectedHourFilter);
+                  }}
+                  className="px-2.5 py-1.5 rounded-xl bg-slate-950 border border-slate-800 text-xs text-slate-300 focus:outline-none focus:border-amber-500"
+                >
+                  <option value="all">📅 All Dates</option>
+                  {availableDates.map((day) => (
+                    <option key={day.date} value={day.date}>
+                      📅 {day.displayDate}
+                    </option>
+                  ))}
+                </select>
+
+                {/* Hourly Dropdown */}
+                <select
+                  value={selectedHourFilter}
+                  onChange={(e) => {
+                    setSelectedHourFilter(e.target.value);
+                    void fetchPasses(passSearch, passDivisionFilter, selectedEvent, selectedDateFilter, e.target.value);
+                  }}
+                  className="px-2.5 py-1.5 rounded-xl bg-slate-950 border border-slate-800 text-xs text-amber-300 font-semibold focus:outline-none focus:border-amber-500"
+                >
+                  <option value="all">⏰ All Hours (24h)</option>
+                  {ALL_HOURS_META.map((meta) => {
+                    const hStat = activeHourlyList.find((h) => h.hour === meta.hour);
+                    const txCount = hStat ? hStat.passTransactions : 0;
+                    return (
+                      <option key={meta.key} value={meta.key}>
+                        ⏰ {meta.hourDisplay} {txCount > 0 ? `(${txCount}p)` : ''}
+                      </option>
+                    );
+                  })}
+                </select>
+
+                {(selectedDateFilter !== 'all' || selectedHourFilter !== 'all' || passDivisionFilter !== 'all') && (
+                  <button
+                    onClick={() => {
+                      setSelectedDateFilter('all');
+                      setSelectedHourFilter('all');
+                      setPassDivisionFilter('all');
+                      void fetchPasses(passSearch, 'all', selectedEvent, 'all', 'all');
+                    }}
+                    className="p-1.5 rounded-xl text-xs font-bold bg-rose-500/15 text-rose-300 border border-rose-500/30 hover:bg-rose-500/20 transition"
+                    title="Clear Filters"
+                  >
+                    <X className="w-3.5 h-3.5" />
+                  </button>
+                )}
               </div>
             </div>
 
@@ -2317,29 +2638,84 @@ export default function Home() {
         {/* 5. DONATION RECORDS TAB */}
         {activeTab === 'donations' && (
           <div className="space-y-4">
-            <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 bg-slate-900/90 border border-slate-800 p-4 rounded-2xl">
+            <div className="flex flex-col lg:flex-row lg:items-center justify-between gap-4 bg-slate-900/90 border border-slate-800 p-4 rounded-2xl">
               <div>
                 <h3 className="text-base font-bold text-white flex items-center gap-2">
                   <Heart className="w-4 h-4 text-rose-400" /> Captured Donation Transactions
                 </h3>
                 <p className="text-xs text-slate-400">
-                  Showing all donor contributions with PAN numbers for 80G tax receipt dispatch
+                  Showing all donor contributions ({donations.length} records)
                 </p>
               </div>
 
-              {/* Search */}
-              <div className="relative">
-                <Search className="w-4 h-4 absolute left-3 top-1/2 -translate-y-1/2 text-slate-400" />
-                <input
-                  type="text"
-                  placeholder="Search donor name, PAN number, order ID..."
-                  value={donationSearch}
+              {/* Filter Toolbar */}
+              <div className="flex flex-wrap items-center gap-2.5">
+                {/* Search */}
+                <div className="relative">
+                  <Search className="w-4 h-4 absolute left-3 top-1/2 -translate-y-1/2 text-slate-400" />
+                  <input
+                    type="text"
+                    placeholder="Search donor name, PAN number, order ID..."
+                    value={donationSearch}
+                    onChange={(e) => {
+                      setDonationSearch(e.target.value);
+                      void fetchDonations(e.target.value, selectedEvent, selectedDateFilter, selectedHourFilter);
+                    }}
+                    className="pl-9 pr-4 py-1.5 rounded-xl bg-slate-950 border border-slate-800 text-xs text-slate-200 placeholder-slate-500 focus:outline-none focus:border-rose-500 w-48 sm:w-60"
+                  />
+                </div>
+
+                {/* Date Dropdown */}
+                <select
+                  value={selectedDateFilter}
                   onChange={(e) => {
-                    setDonationSearch(e.target.value);
-                    fetchDonations(e.target.value, selectedEvent);
+                    setSelectedDateFilter(e.target.value);
+                    void fetchDonations(donationSearch, selectedEvent, e.target.value, selectedHourFilter);
                   }}
-                  className="pl-9 pr-4 py-2 rounded-xl bg-slate-950 border border-slate-800 text-xs text-slate-200 placeholder-slate-500 focus:outline-none focus:border-rose-500 w-full sm:w-72"
-                />
+                  className="px-2.5 py-1.5 rounded-xl bg-slate-950 border border-slate-800 text-xs text-slate-300 focus:outline-none focus:border-rose-500"
+                >
+                  <option value="all">📅 All Dates</option>
+                  {availableDates.map((day) => (
+                    <option key={day.date} value={day.date}>
+                      📅 {day.displayDate}
+                    </option>
+                  ))}
+                </select>
+
+                {/* Hourly Dropdown */}
+                <select
+                  value={selectedHourFilter}
+                  onChange={(e) => {
+                    setSelectedHourFilter(e.target.value);
+                    void fetchDonations(donationSearch, selectedEvent, selectedDateFilter, e.target.value);
+                  }}
+                  className="px-2.5 py-1.5 rounded-xl bg-slate-950 border border-slate-800 text-xs text-rose-300 font-semibold focus:outline-none focus:border-rose-500"
+                >
+                  <option value="all">⏰ All Hours (24h)</option>
+                  {ALL_HOURS_META.map((meta) => {
+                    const hStat = activeHourlyList.find((h) => h.hour === meta.hour);
+                    const txCount = hStat ? hStat.donationTransactions : 0;
+                    return (
+                      <option key={meta.key} value={meta.key}>
+                        ⏰ {meta.hourDisplay} {txCount > 0 ? `(${txCount}d)` : ''}
+                      </option>
+                    );
+                  })}
+                </select>
+
+                {(selectedDateFilter !== 'all' || selectedHourFilter !== 'all') && (
+                  <button
+                    onClick={() => {
+                      setSelectedDateFilter('all');
+                      setSelectedHourFilter('all');
+                      void fetchDonations(donationSearch, selectedEvent, 'all', 'all');
+                    }}
+                    className="p-1.5 rounded-xl text-xs font-bold bg-rose-500/15 text-rose-300 border border-rose-500/30 hover:bg-rose-500/20 transition"
+                    title="Clear Filters"
+                  >
+                    <X className="w-3.5 h-3.5" />
+                  </button>
+                )}
               </div>
             </div>
 

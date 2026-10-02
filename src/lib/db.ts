@@ -362,34 +362,66 @@ export async function insertEventRecords(records: EventRecord[]): Promise<{ inse
 
 const MONTH_NAMES = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
 
-export function parseRecordDate(dateStr?: string): { isoDate: string; displayDate: string } {
+export function formatHourRange(hour: number): { hourLabel: string; hourDisplay: string; isoHour: string } {
+  const h = Math.max(0, Math.min(23, isNaN(hour) ? 0 : hour));
+  const startPeriod = h >= 12 ? 'PM' : 'AM';
+  const startH12 = h % 12 === 0 ? 12 : h % 12;
+  const startStr = `${String(startH12).padStart(2, '0')}:00 ${startPeriod}`;
+  const startShort = `${String(startH12).padStart(2, '0')} ${startPeriod}`;
+
+  const nextH = (h + 1) % 24;
+  const nextPeriod = nextH >= 12 ? 'PM' : 'AM';
+  const nextH12 = nextH % 12 === 0 ? 12 : nextH % 12;
+  const nextStr = `${String(nextH12).padStart(2, '0')}:00 ${nextPeriod}`;
+
+  return {
+    hourLabel: startShort,
+    hourDisplay: `${startStr} - ${nextStr}`,
+    isoHour: String(h).padStart(2, '0'),
+  };
+}
+
+export function parseRecordDateTime(dateStr?: string): {
+  isoDate: string;
+  displayDate: string;
+  hour: number;
+  isoHour: string;
+  hourDisplay: string;
+  hourLabel: string;
+} {
   if (!dateStr || !dateStr.trim()) {
-    return { isoDate: 'unknown', displayDate: 'Date Unspecified' };
+    const { hourLabel, hourDisplay, isoHour } = formatHourRange(0);
+    return { isoDate: 'unknown', displayDate: 'Date Unspecified', hour: 0, isoHour, hourDisplay, hourLabel };
   }
   const trimmed = dateStr.trim();
 
-  // Pattern: DD/MM/YYYY or DD-MM-YYYY or DD/MM/YY
-  const dmyMatch = trimmed.match(/^(\d{1,2})[\/\-](\d{1,2})[\/\-](\d{2,4})/);
+  // Pattern: DD/MM/YYYY HH:mm:ss or DD-MM-YYYY HH:mm:ss
+  const dmyMatch = trimmed.match(/^(\d{1,2})[\/\-](\d{1,2})[\/\-](\d{2,4})(?:\s+(\d{1,2})(?::(\d{1,2}))?(?::(\d{1,2}))?)?/);
   if (dmyMatch) {
     const day = parseInt(dmyMatch[1], 10);
     const month = parseInt(dmyMatch[2], 10);
     let year = parseInt(dmyMatch[3], 10);
     if (year < 100) year += 2000;
+    const hour = dmyMatch[4] !== undefined ? parseInt(dmyMatch[4], 10) : 0;
 
     const isoDate = `${year}-${String(month).padStart(2, '0')}-${String(day).padStart(2, '0')}`;
     const displayDate = `${day} ${MONTH_NAMES[month - 1] || month} ${year}`;
-    return { isoDate, displayDate };
+    const { hourLabel, hourDisplay, isoHour } = formatHourRange(hour);
+    return { isoDate, displayDate, hour, isoHour, hourDisplay, hourLabel };
   }
 
-  // Pattern: YYYY-MM-DD
-  const ymdMatch = trimmed.match(/^(\d{4})[\/\-](\d{1,2})[\/\-](\d{1,2})/);
+  // Pattern: YYYY-MM-DD HH:mm:ss
+  const ymdMatch = trimmed.match(/^(\d{4})[\/\-](\d{1,2})[\/\-](\d{1,2})(?:\s+(\d{1,2})(?::(\d{1,2}))?(?::(\d{1,2}))?)?/);
   if (ymdMatch) {
     const year = parseInt(ymdMatch[1], 10);
     const month = parseInt(ymdMatch[2], 10);
     const day = parseInt(ymdMatch[3], 10);
+    const hour = ymdMatch[4] !== undefined ? parseInt(ymdMatch[4], 10) : 0;
+
     const isoDate = `${year}-${String(month).padStart(2, '0')}-${String(day).padStart(2, '0')}`;
     const displayDate = `${day} ${MONTH_NAMES[month - 1] || month} ${year}`;
-    return { isoDate, displayDate };
+    const { hourLabel, hourDisplay, isoHour } = formatHourRange(hour);
+    return { isoDate, displayDate, hour, isoHour, hourDisplay, hourLabel };
   }
 
   // Standard JS Date parsing
@@ -399,14 +431,118 @@ export function parseRecordDate(dateStr?: string): { isoDate: string; displayDat
       const year = d.getFullYear();
       const month = d.getMonth() + 1;
       const day = d.getDate();
+      const hour = d.getHours();
       const isoDate = `${year}-${String(month).padStart(2, '0')}-${String(day).padStart(2, '0')}`;
       const displayDate = `${day} ${MONTH_NAMES[month - 1] || month} ${year}`;
-      return { isoDate, displayDate };
+      const { hourLabel, hourDisplay, isoHour } = formatHourRange(hour);
+      return { isoDate, displayDate, hour, isoHour, hourDisplay, hourLabel };
     }
   } catch {}
 
   const simple = trimmed.split(' ')[0] || 'Unknown';
-  return { isoDate: simple, displayDate: simple };
+  const { hourLabel, hourDisplay, isoHour } = formatHourRange(0);
+  return { isoDate: simple, displayDate: simple, hour: 0, isoHour, hourDisplay, hourLabel };
+}
+
+export function parseRecordDate(dateStr?: string): { isoDate: string; displayDate: string } {
+  const { isoDate, displayDate } = parseRecordDateTime(dateStr);
+  return { isoDate, displayDate };
+}
+
+// Compute Hourly Breakdown Statistics
+export function computeHourlyStats(records: EventRecord[]): import('./types').HourlyStat[] {
+  const hourMap = new Map<number, {
+    passTransactions: number;
+    totalPasses: number;
+    donationTransactions: number;
+    totalDonationAmount: number;
+    divisionMap: Map<string, {
+      passTransactions: number;
+      totalPasses: number;
+      donationTransactions: number;
+      totalDonationAmount: number;
+    }>;
+  }>();
+
+  for (let h = 0; h < 24; h++) {
+    hourMap.set(h, {
+      passTransactions: 0,
+      totalPasses: 0,
+      donationTransactions: 0,
+      totalDonationAmount: 0,
+      divisionMap: new Map(),
+    });
+  }
+
+  for (const r of records) {
+    const { hour } = parseRecordDateTime(r.payment_date || r.created_at);
+    const validHour = Math.max(0, Math.min(23, isNaN(hour) ? 0 : hour));
+    const hData = hourMap.get(validHour)!;
+
+    const rawDiv = (r.divisions || '').trim();
+    const divName = rawDiv && rawDiv !== 'null' && rawDiv !== 'undefined' ? rawDiv : 'Direct / Unassigned';
+
+    if (!hData.divisionMap.has(divName)) {
+      hData.divisionMap.set(divName, {
+        passTransactions: 0,
+        totalPasses: 0,
+        donationTransactions: 0,
+        totalDonationAmount: 0,
+      });
+    }
+    const divEntry = hData.divisionMap.get(divName)!;
+
+    if (r.record_type === 'PASS') {
+      const qty = Number(r.item_quantity) || 1;
+      hData.passTransactions++;
+      hData.totalPasses += qty;
+      divEntry.passTransactions++;
+      divEntry.totalPasses += qty;
+    } else if (r.record_type === 'DONATION') {
+      const amt = Number(r.total_payment_amount) || Number(r.item_payment_amount) || 0;
+      hData.donationTransactions++;
+      hData.totalDonationAmount += amt;
+      divEntry.donationTransactions++;
+      divEntry.totalDonationAmount += amt;
+    }
+  }
+
+  const result: import('./types').HourlyStat[] = [];
+  for (let h = 0; h < 24; h++) {
+    const dData = hourMap.get(h)!;
+    const { hourLabel, hourDisplay, isoHour } = formatHourRange(h);
+
+    const divisionStats: DayDivisionStat[] = [];
+    for (const [division, divD] of dData.divisionMap.entries()) {
+      divisionStats.push({
+        division,
+        passTransactions: divD.passTransactions,
+        totalPasses: divD.totalPasses,
+        donationTransactions: divD.donationTransactions,
+        totalDonationAmount: divD.totalDonationAmount,
+        totalRevenue: divD.totalDonationAmount,
+        totalTransactions: divD.passTransactions + divD.donationTransactions,
+      });
+    }
+
+    divisionStats.sort((a, b) => b.totalPasses - a.totalPasses || b.totalDonationAmount - a.totalDonationAmount);
+
+    result.push({
+      hour: h,
+      hourLabel,
+      hourDisplay,
+      isoHour,
+      passTransactions: dData.passTransactions,
+      totalPasses: dData.totalPasses,
+      donationTransactions: dData.donationTransactions,
+      totalDonationAmount: dData.totalDonationAmount,
+      totalRevenue: dData.totalDonationAmount,
+      totalTransactions: dData.passTransactions + dData.donationTransactions,
+      divisionStats,
+    });
+  }
+
+  return result;
 }
 
 // Compute Overall Day-Wise & Day-Wise Division Statistics
@@ -415,6 +551,7 @@ export function computeDayWiseStats(records: EventRecord[]): DayWiseStat[] {
     string,
     {
       displayDate: string;
+      records: EventRecord[];
       passTransactions: number;
       totalPasses: number;
       donationTransactions: number;
@@ -432,10 +569,11 @@ export function computeDayWiseStats(records: EventRecord[]): DayWiseStat[] {
   >();
 
   for (const r of records) {
-    const { isoDate, displayDate } = parseRecordDate(r.payment_date || r.created_at);
+    const { isoDate, displayDate } = parseRecordDateTime(r.payment_date || r.created_at);
     if (!dayMap.has(isoDate)) {
       dayMap.set(isoDate, {
         displayDate,
+        records: [],
         passTransactions: 0,
         totalPasses: 0,
         donationTransactions: 0,
@@ -445,6 +583,7 @@ export function computeDayWiseStats(records: EventRecord[]): DayWiseStat[] {
     }
 
     const day = dayMap.get(isoDate)!;
+    day.records.push(r);
     const rawDiv = (r.divisions || '').trim();
     const divName = rawDiv && rawDiv !== 'null' && rawDiv !== 'undefined' ? rawDiv : 'Direct / Unassigned';
 
@@ -490,6 +629,8 @@ export function computeDayWiseStats(records: EventRecord[]): DayWiseStat[] {
 
     divisionStats.sort((a, b) => b.totalPasses - a.totalPasses || b.totalDonationAmount - a.totalDonationAmount);
 
+    const hourlyStats = computeHourlyStats(data.records);
+
     result.push({
       date,
       displayDate: data.displayDate,
@@ -500,6 +641,7 @@ export function computeDayWiseStats(records: EventRecord[]): DayWiseStat[] {
       totalRevenue: data.totalDonationAmount,
       totalTransactions: data.passTransactions + data.donationTransactions,
       divisionStats,
+      hourlyStats,
     });
   }
 
@@ -681,6 +823,7 @@ export async function getDashboardStats(eventId?: string): Promise<DashboardStat
 
       const divisionStats = computeDivisionStats(records);
       const dayWiseStats = computeDayWiseStats(records);
+      const hourlyStats = computeHourlyStats(records);
 
       return {
         totalCapturedPasses,
@@ -692,6 +835,7 @@ export async function getDashboardStats(eventId?: string): Promise<DashboardStat
         latestImport: latestBatches && latestBatches.length > 0 ? latestBatches[0] : null,
         divisionStats,
         dayWiseStats,
+        hourlyStats,
       };
     } catch (err) {
       console.warn('Supabase getDashboardStats error, using local store:', err);
@@ -717,6 +861,7 @@ export async function getDashboardStats(eventId?: string): Promise<DashboardStat
 
   const divisionStats = computeDivisionStats(records);
   const dayWiseStats = computeDayWiseStats(records);
+  const hourlyStats = computeHourlyStats(records);
 
   return {
     totalCapturedPasses,
@@ -728,6 +873,7 @@ export async function getDashboardStats(eventId?: string): Promise<DashboardStat
     latestImport: batches.length > 0 ? batches[0] : null,
     divisionStats,
     dayWiseStats,
+    hourlyStats,
   };
 }
 
@@ -737,10 +883,12 @@ export async function getRecords(params: {
   eventId?: string;
   search?: string;
   division?: string;
+  date?: string;
+  hour?: number | string;
   limit?: number;
   offset?: number;
 }): Promise<{ records: EventRecord[]; total: number }> {
-  const { type, eventId, search, division, limit = 50, offset = 0 } = params;
+  const { type, eventId, search, division, date, hour, limit = 50, offset = 0 } = params;
 
   const client = getSupabaseClient();
   if (isUsingSupabase() && client) {
@@ -752,6 +900,13 @@ export async function getRecords(params: {
       }
       if (division && division !== 'all') {
         records = records.filter((r) => r.divisions === division);
+      }
+      if (date && date !== 'all') {
+        records = records.filter((r) => parseRecordDateTime(r.payment_date || r.created_at).isoDate === date);
+      }
+      if (hour !== undefined && hour !== null && hour !== 'all' && String(hour).trim() !== '') {
+        const targetH = Number(hour);
+        records = records.filter((r) => parseRecordDateTime(r.payment_date || r.created_at).hour === targetH);
       }
       if (search && search.trim()) {
         const s = search.trim().toLowerCase();
@@ -786,6 +941,13 @@ export async function getRecords(params: {
   }
   if (division && division !== 'all') {
     list = list.filter((r) => r.divisions === division);
+  }
+  if (date && date !== 'all') {
+    list = list.filter((r) => parseRecordDateTime(r.payment_date || r.created_at).isoDate === date);
+  }
+  if (hour !== undefined && hour !== null && hour !== 'all' && String(hour).trim() !== '') {
+    const targetH = Number(hour);
+    list = list.filter((r) => parseRecordDateTime(r.payment_date || r.created_at).hour === targetH);
   }
   if (search && search.trim()) {
     const s = search.trim().toLowerCase();

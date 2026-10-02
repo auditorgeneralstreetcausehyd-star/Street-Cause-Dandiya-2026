@@ -26,6 +26,20 @@ export interface DayDivisionStat {
   totalTransactions: number;
 }
 
+export interface HourlyStat {
+  hour: number;          // 0 - 23
+  hourLabel: string;     // '02 PM' or '02:00 PM'
+  hourDisplay: string;   // '02:00 PM - 03:00 PM'
+  isoHour: string;       // '14'
+  passTransactions: number;
+  totalPasses: number;
+  donationTransactions: number;
+  totalDonationAmount: number;
+  totalRevenue: number;
+  totalTransactions: number;
+  divisionStats: DayDivisionStat[];
+}
+
 export interface DayWiseStat {
   date: string;         // 'YYYY-MM-DD'
   displayDate: string;  // e.g. '20 Sep 2026'
@@ -36,6 +50,7 @@ export interface DayWiseStat {
   totalRevenue: number;
   totalTransactions: number;
   divisionStats: DayDivisionStat[];
+  hourlyStats?: HourlyStat[];
 }
 
 export interface VolunteerStat {
@@ -136,6 +151,7 @@ export interface DashboardStats {
   latestImport?: ImportBatch | null;
   divisionStats?: DivisionStats[];
   dayWiseStats?: DayWiseStat[];
+  hourlyStats?: HourlyStat[];
 }
 
 export interface SystemSettings {

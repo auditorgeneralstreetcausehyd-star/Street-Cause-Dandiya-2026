@@ -24,12 +24,14 @@ export async function GET(req: NextRequest) {
     const type = typeParam === 'PASS' || typeParam === 'DONATION' ? (typeParam as RecordType) : undefined;
     const eventId = searchParams.get('eventId') || undefined;
     const division = searchParams.get('division') || undefined;
+    const date = searchParams.get('date') || undefined;
+    const hour = searchParams.get('hour') || undefined;
     const search = searchParams.get('search') || '';
     const limit = parseInt(searchParams.get('limit') || '50', 10);
     const offset = parseInt(searchParams.get('offset') || '0', 10);
     const forceRefresh = searchParams.get('forceRefresh') === 'true';
 
-    const cacheKey = `records_${type || 'ALL'}_${eventId || 'ALL'}_${division || 'ALL'}_${search}_${limit}_${offset}`;
+    const cacheKey = `records_${type || 'ALL'}_${eventId || 'ALL'}_${division || 'ALL'}_${date || 'ALL'}_${hour || 'ALL'}_${search}_${limit}_${offset}`;
 
     if (forceRefresh) {
       invalidateCache(cacheKey);
@@ -38,7 +40,7 @@ export async function GET(req: NextRequest) {
     // 3. Cached fetch (30 seconds TTL)
     const { data: result, isCached, ageSeconds } = await getOrSetCache(
       cacheKey,
-      () => getRecords({ type, eventId, division, search, limit, offset }),
+      () => getRecords({ type, eventId, division, date, hour, search, limit, offset }),
       30
     );
 
