@@ -27,18 +27,29 @@ function extractField(row: Record<string, unknown>, targets: string[]): string {
     const normTarget = normalizeKey(t);
     const foundKey = keys.find((k) => normalizeKey(k) === normTarget);
     if (foundKey && row[foundKey] !== undefined && row[foundKey] !== null) {
-      return String(row[foundKey]).trim();
+      const val = row[foundKey];
+      if (val instanceof Date) {
+        // Format to DD/MM/YYYY HH:mm:ss
+        const day = String(val.getDate()).padStart(2, '0');
+        const month = String(val.getMonth() + 1).padStart(2, '0');
+        const year = val.getFullYear();
+        const hours = String(val.getHours()).padStart(2, '0');
+        const minutes = String(val.getMinutes()).padStart(2, '0');
+        const seconds = String(val.getSeconds()).padStart(2, '0');
+        return `${day}/${month}/${year} ${hours}:${minutes}:${seconds}`;
+      }
+      return String(val).trim();
     }
   }
   return '';
 }
 
 export function parseRawRows(buffer: Buffer): Record<string, unknown>[] {
-  const workbook = XLSX.read(buffer, { type: 'buffer', cellDates: true });
+  const workbook = XLSX.read(buffer, { type: 'buffer', cellDates: false });
   const sheetName = workbook.SheetNames[0];
   if (!sheetName) return [];
   const sheet = workbook.Sheets[sheetName];
-  return XLSX.utils.sheet_to_json<Record<string, unknown>>(sheet, { defval: '' });
+  return XLSX.utils.sheet_to_json<Record<string, unknown>>(sheet, { defval: '', raw: false });
 }
 
 // Helper: Event Classifier from Payment Page Title (Column B: "SC HYD GARBA GROOVE" vs "SC HYD NAVRATRI UTSAV")

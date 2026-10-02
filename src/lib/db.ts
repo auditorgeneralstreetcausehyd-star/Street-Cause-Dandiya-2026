@@ -300,7 +300,7 @@ export async function updateImportBatch(id: string, updates: Partial<ImportBatch
   }
 }
 
-// Helper: Bulk insert records into a specific table
+// Helper: Bulk insert/upsert records into a specific table (skipping existing order_ids gracefully)
 async function bulkInsertToTable(
   client: SupabaseClient,
   tableName: string,
@@ -316,12 +316,22 @@ async function bulkInsertToTable(
       return clean;
     });
 
-    const { error } = await client.from(tableName).insert(chunk);
+    // Use upsert with ignoreDuplicates so existing order_ids never abort the insertion of new records
+    const { data, error } = await client
+      .from(tableName)
+      .upsert(chunk, { onConflict: 'order_id', ignoreDuplicates: true })
+      .select('id');
+
     if (error) {
-      console.error(`Insert to ${tableName} failed: ${error.message}`);
-      throw error;
+      console.error(`Upsert to ${tableName} failed: ${error.message}`);
+      // Fallback: try individual inserts ignoring duplicates
+      for (const row of chunk) {
+        const { error: singleErr } = await client.from(tableName).upsert([row], { onConflict: 'order_id', ignoreDuplicates: true });
+        if (!singleErr) count++;
+      }
+    } else {
+      count += data?.length ?? chunk.length;
     }
-    count += chunk.length;
   }
   return count;
 }
@@ -355,9 +365,12 @@ export async function insertEventRecords(records: EventRecord[]): Promise<{ inse
   }
 
   const local = readLocalDb();
-  local.records.push(...toInsert);
+  // Filter out any local duplicates by order_id + record_type
+  const existingSet = new Set(local.records.map(r => `${r.event_id}__${r.record_type}__${r.order_id}`));
+  const uniqueToInsert = toInsert.filter(r => !existingSet.has(`${r.event_id}__${r.record_type}__${r.order_id}`));
+  local.records.push(...uniqueToInsert);
   writeLocalDb(local);
-  return { inserted: toInsert.length, skipped: 0, errors: [] };
+  return { inserted: uniqueToInsert.length, skipped: toInsert.length - uniqueToInsert.length, errors: [] };
 }
 
 const MONTH_NAMES = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
