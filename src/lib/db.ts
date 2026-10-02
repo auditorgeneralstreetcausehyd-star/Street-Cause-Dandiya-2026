@@ -218,9 +218,11 @@ async function fetchAllFromSupabase<T = Record<string, unknown>>(
   return all;
 }
 
-// Check existing order_ids scoped by event and record type (PASS or DONATION) across 4 tables.
-// Keys are stored as both `eventId__TYPE__orderId` (for insert deduplication)
-// and `TYPE__orderId` (for backwards-compat in analyzeExcelBuffer).
+// Check existing order_ids strictly scoped by event and record type (PASS or DONATION) across each of the 4 tables.
+// Table 1: Garba Groove Passes -> garba_groove__PASS__order_id
+// Table 2: Garba Groove Donations -> garba_groove__DONATION__order_id
+// Table 3: Navratri Utsav Passes -> navratri_utsav__PASS__order_id
+// Table 4: Navratri Utsav Donations -> navratri_utsav__DONATION__order_id
 export async function getExistingRecordKeys(): Promise<Set<string>> {
   const client = getSupabaseClient();
   if (isUsingSupabase() && client) {
@@ -235,22 +237,10 @@ export async function getExistingRecordKeys(): Promise<Set<string>> {
         fetchAllFromSupabase<{ order_id: string }>(client, 'navratri_utsav_donations', 'order_id'),
       ]);
 
-      ggPasses.forEach((r) => {
-        keys.add(`garba_groove__PASS__${r.order_id}`);
-        keys.add(`PASS__${r.order_id}`);
-      });
-      ggDonations.forEach((r) => {
-        keys.add(`garba_groove__DONATION__${r.order_id}`);
-        keys.add(`DONATION__${r.order_id}`);
-      });
-      nuPasses.forEach((r) => {
-        keys.add(`navratri_utsav__PASS__${r.order_id}`);
-        keys.add(`PASS__${r.order_id}`);
-      });
-      nuDonations.forEach((r) => {
-        keys.add(`navratri_utsav__DONATION__${r.order_id}`);
-        keys.add(`DONATION__${r.order_id}`);
-      });
+      ggPasses.forEach((r) => keys.add(`garba_groove__PASS__${r.order_id}`));
+      ggDonations.forEach((r) => keys.add(`garba_groove__DONATION__${r.order_id}`));
+      nuPasses.forEach((r) => keys.add(`navratri_utsav__PASS__${r.order_id}`));
+      nuDonations.forEach((r) => keys.add(`navratri_utsav__DONATION__${r.order_id}`));
 
       return keys;
     } catch (err) {
@@ -336,17 +326,11 @@ async function bulkInsertToTable(
   return count;
 }
 
-// Insert Event Records into their respective event table with duplicate avoidance
+// Insert Event Records directly into their respective event tables (passes vs donations)
 export async function insertEventRecords(records: EventRecord[]): Promise<{ inserted: number; skipped: number; errors: Array<{ row: number; error: string }> }> {
   if (records.length === 0) return { inserted: 0, skipped: 0, errors: [] };
 
-  const existingKeys = await getExistingRecordKeys();
-  const toInsert = records.filter((r) => !existingKeys.has(`${r.event_id || 'garba_groove'}__${r.record_type || 'PASS'}__${r.order_id}`));
-  const skipped = records.length - toInsert.length;
-
-  if (toInsert.length === 0) {
-    return { inserted: 0, skipped, errors: [] };
-  }
+  const toInsert = records;
 
   const client = getSupabaseClient();
   if (isUsingSupabase() && client) {
@@ -364,7 +348,7 @@ export async function insertEventRecords(records: EventRecord[]): Promise<{ inse
         bulkInsertToTable(client, 'navratri_utsav_donations', navratriDonations),
       ]);
 
-      return { inserted: gpCount + gdCount + npCount + ndCount, skipped, errors: [] };
+      return { inserted: gpCount + gdCount + npCount + ndCount, skipped: 0, errors: [] };
     } catch (err) {
       console.warn('Supabase bulk insert failed, storing locally:', err);
     }
@@ -373,7 +357,7 @@ export async function insertEventRecords(records: EventRecord[]): Promise<{ inse
   const local = readLocalDb();
   local.records.push(...toInsert);
   writeLocalDb(local);
-  return { inserted: toInsert.length, skipped, errors: [] };
+  return { inserted: toInsert.length, skipped: 0, errors: [] };
 }
 
 const MONTH_NAMES = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];

@@ -2067,16 +2067,15 @@ export default function Home() {
                     <div className="text-[11px] text-emerald-400">Valid Captured Rows</div>
                     <div className="text-xl font-bold text-emerald-400">{analysis.capturedRows}</div>
                   </div>
-                  <div className="bg-slate-950 p-3 rounded-xl border border-slate-800">
-                    <div className="text-[11px] text-amber-400">Duplicates Detected</div>
-                    <div className="text-xl font-bold text-amber-400">{analysis.totalDuplicatesToSkip}</div>
-                    <div className="text-[10px] text-slate-500">
-                      {analysis.duplicatesInFile > 0 && analysis.existingDuplicatesCount === 0 ? 'Within this Excel file' : 'Will be safely skipped'}
-                    </div>
+                  <div className="bg-slate-950 p-3 rounded-xl border border-amber-500/30 bg-amber-500/5">
+                    <div className="text-[11px] text-amber-400">Pass Items</div>
+                    <div className="text-xl font-bold text-amber-400">{analysis.totalPasses} passes</div>
+                    <div className="text-[10px] text-slate-400">{analysis.passTransactions} rows → Pass Table</div>
                   </div>
-                  <div className="bg-slate-950 p-3 rounded-xl border border-slate-800">
-                    <div className="text-[11px] text-blue-400">New Records to Ingest</div>
-                    <div className="text-xl font-bold text-blue-400">{analysis.newRecordsToImport}</div>
+                  <div className="bg-slate-950 p-3 rounded-xl border border-rose-500/30 bg-rose-500/5">
+                    <div className="text-[11px] text-rose-400">Donation Items</div>
+                    <div className="text-xl font-bold text-rose-400">₹{analysis.totalDonationAmount.toLocaleString()}</div>
+                    <div className="text-[10px] text-slate-400">{analysis.donationTransactions} rows → Donation Table</div>
                   </div>
                 </div>
 
@@ -2090,7 +2089,7 @@ export default function Home() {
                       {analysis.totalPasses} <span className="text-sm font-semibold text-slate-400">Passes</span>
                     </div>
                     <p className="text-xs text-slate-400 mt-0.5">
-                      from {analysis.passTransactions} transactions → Target Sheet: <strong className="text-slate-200">PASS</strong>
+                      from {analysis.passTransactions} transactions → Target Sheet: <strong className="text-amber-300">PASS TABLE</strong>
                     </p>
                   </div>
 
@@ -2102,49 +2101,16 @@ export default function Home() {
                       ₹{analysis.totalDonationAmount.toLocaleString()}
                     </div>
                     <p className="text-xs text-slate-400 mt-0.5">
-                      from {analysis.donationTransactions} donors → Target Sheet: <strong className="text-slate-200">DONATION</strong>
+                      from {analysis.donationTransactions} donors → Target Sheet: <strong className="text-rose-300">DONATION TABLE</strong>
                     </p>
                   </div>
                 </div>
 
-                {/* Duplicates Details Preview */}
-                {analysis.previewDuplicates && analysis.previewDuplicates.length > 0 && (
-                  <div className="bg-slate-950/80 rounded-xl p-3 border border-amber-500/20 text-xs space-y-2">
-                    <div className="text-amber-400 font-semibold text-[11px] flex items-center gap-1.5">
-                      <AlertTriangle className="w-3.5 h-3.5" />
-                      Duplicate Order IDs Detected Within File ({analysis.previewDuplicates.length}):
-                    </div>
-                    <div className="space-y-1 max-h-28 overflow-y-auto">
-                      {analysis.previewDuplicates.map((dup, idx) => (
-                        <div key={idx} className="flex items-center justify-between text-[11px] bg-slate-900/90 px-2.5 py-1 rounded-lg border border-slate-800/80">
-                          <span className="font-mono text-amber-300 font-medium">{dup.order_id}</span>
-                          <span className="text-slate-300">{dup.name || 'Unknown'}</span>
-                          <span className="text-slate-400 truncate max-w-[160px]">{dup.item_name || 'Pass'}</span>
-                        </div>
-                      ))}
-                    </div>
-                    <p className="text-[10px] text-slate-500">
-                      These orders appeared more than once in the uploaded Excel file. Only the first occurrence will be ingested.
-                    </p>
-                  </div>
-                )}
-
                 {/* Stage 2 Action Bar */}
                 <div className="pt-4 border-t border-slate-800 flex flex-col sm:flex-row sm:items-center justify-between gap-3">
-                  <div className="text-xs text-slate-400">
-                    {analysis.totalDuplicatesToSkip > 0 ? (
-                      <span className="text-amber-400 font-medium">
-                        {analysis.duplicatesInFile > 0 && analysis.existingDuplicatesCount > 0
-                          ? `⚠️ ${analysis.duplicatesInFile} duplicate rows within this Excel file and ${analysis.existingDuplicatesCount} rows already in DB will be skipped.`
-                          : analysis.duplicatesInFile > 0
-                          ? `ℹ️ ${analysis.duplicatesInFile} duplicate rows found within this Excel file itself (will be deduplicated).`
-                          : `⚠️ ${analysis.existingDuplicatesCount} rows already exist in DB and will NOT be duplicated.`}
-                      </span>
-                    ) : (
-                      <span className="text-emerald-400 font-medium">
-                        ✓ All {analysis.newRecordsToImport} records are fresh and ready for ingestion.
-                      </span>
-                    )}
+                  <div className="text-xs text-emerald-400 font-medium flex items-center gap-2">
+                    <CheckCircle2 className="w-4 h-4 text-emerald-400 shrink-0" />
+                    <span>All {analysis.newRecordsToImport} captured rows will be sorted and ingested into respective event Pass & Donation tables.</span>
                   </div>
 
                   <button
@@ -2154,11 +2120,11 @@ export default function Home() {
                   >
                     {importing ? (
                       <>
-                        <RefreshCw className="w-4 h-4 animate-spin" /> Ingesting & Syncing Sheets...
+                        <RefreshCw className="w-4 h-4 animate-spin" /> Ingesting & Sorting Records...
                       </>
                     ) : (
                       <>
-                        <Check className="w-4 h-4" /> Confirm & Ingest {analysis.newRecordsToImport} Records
+                        <Check className="w-4 h-4" /> Confirm & Ingest All {analysis.newRecordsToImport} Records
                       </>
                     )}
                   </button>

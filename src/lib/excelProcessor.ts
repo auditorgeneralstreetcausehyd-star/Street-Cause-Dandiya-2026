@@ -164,28 +164,6 @@ export async function analyzeExcelBuffer(
     }
 
     const recordType: RecordType = isPass ? 'PASS' : 'DONATION';
-    const dedupeKey = `${recordType}__${orderId}`;
-
-    // Duplicate Check scoped to record type & table (order_id can exist as both PASS and DONATION)
-    let isDup = false;
-    if (fileRecordKeys.has(dedupeKey)) {
-      duplicatesInFile++;
-      isDup = true;
-    } else {
-      fileRecordKeys.add(dedupeKey);
-    }
-
-    if (existingRecordKeys.has(dedupeKey)) {
-      existingDuplicatesCount++;
-      isDup = true;
-    }
-
-    if (isDup) {
-      if (previewDuplicates.length < 10) {
-        previewDuplicates.push({ order_id: `${orderId} (${recordType})`, name, item_name: itemName });
-      }
-      continue;
-    }
 
     const qty = parseInt(rawQty, 10);
     const validQty = isNaN(qty) || qty <= 0 ? 1 : qty;
@@ -243,7 +221,7 @@ export async function analyzeExcelBuffer(
   }
 
   const finalEventName = finalEventId === 'navratri_utsav' ? 'Navratri Nirvana 2026' : 'Garba Groove 2026';
-  const totalDuplicatesToSkip = duplicatesInFile + existingDuplicatesCount;
+  const totalDuplicatesToSkip = 0;
   const newRecordsToImport = passTransactions + donationTransactions;
 
   return {
@@ -260,9 +238,9 @@ export async function analyzeExcelBuffer(
     totalPasses,
     donationTransactions,
     totalDonationAmount,
-    duplicatesInFile,
-    existingDuplicatesCount,
-    totalDuplicatesToSkip,
+    duplicatesInFile: 0,
+    existingDuplicatesCount: 0,
+    totalDuplicatesToSkip: 0,
     newRecordsToImport,
     unclassifiedRowsCount,
     warnings: warnings.slice(0, 15),
@@ -349,13 +327,6 @@ export async function processAndImportExcel(
     }
 
     const recordType: RecordType = isPass ? 'PASS' : 'DONATION';
-    const dedupeKey = `${recordType}__${orderId}`;
-
-    // Duplicate prevention scoped to record type & table (order_id can exist in both pass and donation tables)
-    if (existingRecordKeys.has(dedupeKey) || seenInBatch.has(dedupeKey)) {
-      continue;
-    }
-    seenInBatch.add(dedupeKey);
 
     const qty = parseInt(rawQty, 10);
     const validQty = isNaN(qty) || qty <= 0 ? 1 : qty;
@@ -369,7 +340,7 @@ export async function processAndImportExcel(
     const rowEventName = rowDetectedEvent === 'navratri_utsav' ? 'Navratri Nirvana 2026' : 'Garba Groove 2026';
 
     const record: EventRecord = {
-      id: `rec_${Date.now()}_${Math.random().toString(36).substring(2, 7)}`,
+      id: `rec_${Date.now()}_${i}_${Math.random().toString(36).substring(2, 8)}`,
       order_id: orderId,
       code: orderId, // Strictly enforce code === order_id
       event_id: rowDetectedEvent,
