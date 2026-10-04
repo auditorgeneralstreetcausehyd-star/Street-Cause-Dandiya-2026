@@ -47,7 +47,10 @@ import {
   KeyRound,
   EyeOff,
   UserCheck,
-  ShieldCheck
+  ShieldCheck,
+  ArrowUpDown,
+  ArrowUp,
+  ArrowDown
 } from 'lucide-react';
 import { DashboardStats, ImportBatch, EventRecord, PreImportAnalysis, EventId, DayWiseStat, HourlyStat, VolunteerStat, DivisionStats, SystemSettings } from '@/lib/types';
 
@@ -149,6 +152,8 @@ export default function Home() {
   const [expandedDivisionVolunteers, setExpandedDivisionVolunteers] = useState<string | null>(null);
   const [volunteerSearch, setVolunteerSearch] = useState<string>('');
   const [volunteerDivisionFilter, setVolunteerDivisionFilter] = useState<string>('all');
+  const [volunteerSortBy, setVolunteerSortBy] = useState<'passes' | 'donations' | 'totalTxns' | 'passTxns' | 'name'>('passes');
+  const [volunteerSortOrder, setVolunteerSortOrder] = useState<'desc' | 'asc'>('desc');
 
   // Upload Flow State
   const [uploadTargetEvent, setUploadTargetEvent] = useState<'garba_groove' | 'navratri_utsav'>('garba_groove');
@@ -193,17 +198,33 @@ export default function Home() {
     let volunteers = volunteersToExport;
 
     if (!volunteers) {
-      volunteers = allL1.filter((vol) => {
-        const matchesSearch =
-          !volunteerSearch ||
-          vol.name.toLowerCase().includes(volunteerSearch.toLowerCase()) ||
-          vol.l2.toLowerCase().includes(volunteerSearch.toLowerCase()) ||
-          vol.division.toLowerCase().includes(volunteerSearch.toLowerCase());
-        const matchesDiv =
-          volunteerDivisionFilter === 'all' ||
-          vol.division.toLowerCase() === volunteerDivisionFilter.toLowerCase();
-        return matchesSearch && matchesDiv;
-      });
+      volunteers = allL1
+        .filter((vol) => {
+          const matchesSearch =
+            !volunteerSearch ||
+            vol.name.toLowerCase().includes(volunteerSearch.toLowerCase()) ||
+            vol.l2.toLowerCase().includes(volunteerSearch.toLowerCase()) ||
+            vol.division.toLowerCase().includes(volunteerSearch.toLowerCase());
+          const matchesDiv =
+            volunteerDivisionFilter === 'all' ||
+            vol.division.toLowerCase() === volunteerDivisionFilter.toLowerCase();
+          return matchesSearch && matchesDiv;
+        })
+        .sort((a, b) => {
+          let diff = 0;
+          if (volunteerSortBy === 'passes') {
+            diff = b.passes - a.passes || b.donations - a.donations || a.name.localeCompare(b.name);
+          } else if (volunteerSortBy === 'donations') {
+            diff = b.donations - a.donations || b.passes - a.passes || a.name.localeCompare(b.name);
+          } else if (volunteerSortBy === 'totalTxns') {
+            diff = b.totalTransactions - a.totalTransactions || b.passes - a.passes || a.name.localeCompare(b.name);
+          } else if (volunteerSortBy === 'passTxns') {
+            diff = b.passTransactions - a.passTransactions || b.passes - a.passes || a.name.localeCompare(b.name);
+          } else if (volunteerSortBy === 'name') {
+            diff = a.name.localeCompare(b.name);
+          }
+          return volunteerSortOrder === 'asc' ? -diff : diff;
+        });
     }
 
     if (volunteers.length === 0) return;
@@ -2009,21 +2030,59 @@ export default function Home() {
             {divisionViewMode === 'l1_volunteers' && (() => {
               const allL1Volunteers = (stats?.divisionStats || []).flatMap((div) => div.allVolunteers || []);
 
-              const filteredL1 = allL1Volunteers.filter((vol) => {
-                const matchesSearch =
-                  !volunteerSearch ||
-                  vol.name.toLowerCase().includes(volunteerSearch.toLowerCase()) ||
-                  vol.l2.toLowerCase().includes(volunteerSearch.toLowerCase()) ||
-                  vol.division.toLowerCase().includes(volunteerSearch.toLowerCase());
-                const matchesDiv =
-                  volunteerDivisionFilter === 'all' ||
-                  vol.division.toLowerCase() === volunteerDivisionFilter.toLowerCase();
-                return matchesSearch && matchesDiv;
-              });
+              const filteredL1 = allL1Volunteers
+                .filter((vol) => {
+                  const matchesSearch =
+                    !volunteerSearch ||
+                    vol.name.toLowerCase().includes(volunteerSearch.toLowerCase()) ||
+                    vol.l2.toLowerCase().includes(volunteerSearch.toLowerCase()) ||
+                    vol.division.toLowerCase().includes(volunteerSearch.toLowerCase());
+                  const matchesDiv =
+                    volunteerDivisionFilter === 'all' ||
+                    vol.division.toLowerCase() === volunteerDivisionFilter.toLowerCase();
+                  return matchesSearch && matchesDiv;
+                })
+                .sort((a, b) => {
+                  let diff = 0;
+                  if (volunteerSortBy === 'passes') {
+                    diff = b.passes - a.passes || b.donations - a.donations || a.name.localeCompare(b.name);
+                  } else if (volunteerSortBy === 'donations') {
+                    diff = b.donations - a.donations || b.passes - a.passes || a.name.localeCompare(b.name);
+                  } else if (volunteerSortBy === 'totalTxns') {
+                    diff = b.totalTransactions - a.totalTransactions || b.passes - a.passes || a.name.localeCompare(b.name);
+                  } else if (volunteerSortBy === 'passTxns') {
+                    diff = b.passTransactions - a.passTransactions || b.passes - a.passes || a.name.localeCompare(b.name);
+                  } else if (volunteerSortBy === 'name') {
+                    diff = a.name.localeCompare(b.name);
+                  }
+                  return volunteerSortOrder === 'asc' ? -diff : diff;
+                });
 
               const totalL1Passes = filteredL1.reduce((sum, v) => sum + v.passes, 0);
               const totalL1Donations = filteredL1.reduce((sum, v) => sum + v.donations, 0);
-              const topL1Vol = filteredL1.length > 0 ? filteredL1[0] : null;
+              
+              // Top performer by passes sold (irrespective of current sort order)
+              const topPerformer = [...filteredL1].sort((a, b) => b.passes - a.passes || b.donations - a.donations)[0] || null;
+
+              const toggleSort = (field: 'passes' | 'donations' | 'totalTxns' | 'passTxns' | 'name') => {
+                if (volunteerSortBy === field) {
+                  setVolunteerSortOrder((prev) => (prev === 'desc' ? 'asc' : 'desc'));
+                } else {
+                  setVolunteerSortBy(field);
+                  setVolunteerSortOrder(field === 'name' ? 'asc' : 'desc');
+                }
+              };
+
+              const renderSortIcon = (field: 'passes' | 'donations' | 'totalTxns' | 'passTxns' | 'name') => {
+                if (volunteerSortBy !== field) {
+                  return <ArrowUpDown className="w-3 h-3 text-slate-600 inline ml-1 opacity-60 group-hover:opacity-100" />;
+                }
+                return volunteerSortOrder === 'desc' ? (
+                  <ArrowDown className="w-3.5 h-3.5 text-amber-400 inline ml-1" />
+                ) : (
+                  <ArrowUp className="w-3.5 h-3.5 text-amber-400 inline ml-1" />
+                );
+              };
 
               return (
                 <div className="space-y-5">
@@ -2046,13 +2105,13 @@ export default function Home() {
                     <div className="bg-slate-900/90 border border-slate-800 p-4 rounded-2xl">
                       <div className="text-xs text-slate-400">Top L1 Performer</div>
                       <div className="text-sm font-bold text-white mt-1 truncate">
-                        {topL1Vol ? `${topL1Vol.name} (${topL1Vol.passes}p)` : '-'}
+                        {topPerformer ? `${topPerformer.name} (${topPerformer.passes}p)` : '-'}
                       </div>
-                      {topL1Vol && <div className="text-[10px] text-amber-400">{topL1Vol.division}</div>}
+                      {topPerformer && <div className="text-[10px] text-amber-400">{topPerformer.division}</div>}
                     </div>
                   </div>
 
-                  {/* Filter and CSV Export Toolbar */}
+                  {/* Filter, Sort and CSV Export Toolbar */}
                   <div className="bg-slate-900/90 border border-slate-800 p-4 rounded-2xl flex flex-col md:flex-row items-center justify-between gap-3">
                     <div className="flex flex-wrap items-center gap-3 w-full md:w-auto">
                       <div className="relative flex-1 md:w-72">
@@ -2078,6 +2137,34 @@ export default function Home() {
                           </option>
                         ))}
                       </select>
+
+                      {/* Sort By Dropdown & Order Toggle */}
+                      <div className="flex items-center gap-1.5 bg-slate-950 border border-slate-800 rounded-xl px-2 py-1">
+                        <Sliders className="w-3.5 h-3.5 text-slate-400 ml-1" />
+                        <select
+                          value={volunteerSortBy}
+                          onChange={(e) => setVolunteerSortBy(e.target.value as any)}
+                          className="bg-transparent border-none text-xs text-slate-200 py-1 px-1.5 focus:outline-none cursor-pointer"
+                        >
+                          <option value="passes">Sort: Passes Sold</option>
+                          <option value="donations">Sort: Donations Raised</option>
+                          <option value="totalTxns">Sort: Total Txns</option>
+                          <option value="passTxns">Sort: Pass Txns</option>
+                          <option value="name">Sort: Volunteer Name</option>
+                        </select>
+                        <button
+                          type="button"
+                          onClick={() => setVolunteerSortOrder((prev) => (prev === 'desc' ? 'asc' : 'desc'))}
+                          title={volunteerSortOrder === 'desc' ? 'Descending (High to Low)' : 'Ascending (Low to High)'}
+                          className="p-1 text-slate-300 hover:text-amber-400 hover:bg-slate-800 rounded-lg transition"
+                        >
+                          {volunteerSortOrder === 'desc' ? (
+                            <ArrowDown className="w-3.5 h-3.5 text-amber-400" />
+                          ) : (
+                            <ArrowUp className="w-3.5 h-3.5 text-amber-400" />
+                          )}
+                        </button>
+                      </div>
                     </div>
 
                     <button
@@ -2092,16 +2179,41 @@ export default function Home() {
                   <div className="bg-slate-900/90 border border-slate-800 rounded-2xl overflow-hidden shadow-xl">
                     <div className="overflow-x-auto">
                       <table className="w-full text-left text-xs">
-                        <thead className="bg-slate-950/80 text-slate-400 uppercase text-[10px] tracking-wider border-b border-slate-800">
+                        <thead className="bg-slate-950/80 text-slate-400 uppercase text-[10px] tracking-wider border-b border-slate-800 select-none">
                           <tr>
                             <th className="py-3.5 px-4 text-center">Rank</th>
-                            <th className="py-3.5 px-4">L1 Volunteer (Referred)</th>
+                            <th
+                              onClick={() => toggleSort('name')}
+                              className="py-3.5 px-4 cursor-pointer hover:text-amber-400 transition group"
+                            >
+                              L1 Volunteer (Referred) {renderSortIcon('name')}
+                            </th>
                             <th className="py-3.5 px-4">Division</th>
                             <th className="py-3.5 px-4">L2 Leader</th>
-                            <th className="py-3.5 px-4 text-center">Passes Sold</th>
-                            <th className="py-3.5 px-4 text-center">Pass Txns</th>
-                            <th className="py-3.5 px-4 text-center">Donations (₹)</th>
-                            <th className="py-3.5 px-4 text-center">Total Txns</th>
+                            <th
+                              onClick={() => toggleSort('passes')}
+                              className="py-3.5 px-4 text-center cursor-pointer hover:text-amber-400 transition group"
+                            >
+                              Passes Sold {renderSortIcon('passes')}
+                            </th>
+                            <th
+                              onClick={() => toggleSort('passTxns')}
+                              className="py-3.5 px-4 text-center cursor-pointer hover:text-amber-400 transition group"
+                            >
+                              Pass Txns {renderSortIcon('passTxns')}
+                            </th>
+                            <th
+                              onClick={() => toggleSort('donations')}
+                              className="py-3.5 px-4 text-center cursor-pointer hover:text-amber-400 transition group"
+                            >
+                              Donations (₹) {renderSortIcon('donations')}
+                            </th>
+                            <th
+                              onClick={() => toggleSort('totalTxns')}
+                              className="py-3.5 px-4 text-center cursor-pointer hover:text-amber-400 transition group"
+                            >
+                              Total Txns {renderSortIcon('totalTxns')}
+                            </th>
                           </tr>
                         </thead>
                         <tbody className="divide-y divide-slate-800/60 text-slate-300">
