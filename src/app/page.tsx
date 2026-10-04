@@ -161,22 +161,23 @@ export default function Home() {
   const [uploadError, setUploadError] = useState<string | null>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
 
-  // Email sending state
+  // Email sending and dispatch hub state
+  const [passEmailFilter, setPassEmailFilter] = useState<'all' | 'pending' | 'sent' | 'failed'>('all');
   const [selectedPassIds, setSelectedPassIds] = useState<Set<string>>(new Set());
   const [emailSending, setEmailSending] = useState<boolean>(false);
-  const [emailResults, setEmailResults] = useState<Map<string, {status: string, error?: string}>>(new Map());
+  const [emailResults, setEmailResults] = useState<Map<string, { status: string; error?: string }>>(new Map());
+  const [dispatchProgress, setDispatchProgress] = useState<{ current: number; total: number; sent: number; failed: number } | null>(null);
 
-  // Email sending handlers
-  const handleSelectAllPasses = (e: React.ChangeEvent<HTMLInputElement>) => {
-    if (e.target.checked) {
-      setSelectedPassIds(new Set(passes.map(p => p.order_id)));
-    } else {
-      setSelectedPassIds(new Set());
-    }
-  };
+  // Email Preview Modal State
+  const [previewModalOpen, setPreviewModalOpen] = useState<boolean>(false);
+  const [previewLoading, setPreviewLoading] = useState<boolean>(false);
+  const [previewHtml, setPreviewHtml] = useState<string>('');
+  const [previewEventTarget, setPreviewEventTarget] = useState<'garba_groove' | 'navratri_utsav'>('garba_groove');
+  const [previewSelectedOrder, setPreviewSelectedOrder] = useState<string | null>(null);
 
+  // Email selection handlers
   const handleSelectPass = (orderId: string) => {
-    setSelectedPassIds(prev => {
+    setSelectedPassIds((prev) => {
       const next = new Set(prev);
       if (next.has(orderId)) {
         next.delete(orderId);
@@ -246,56 +247,101 @@ export default function Home() {
     document.body.removeChild(link);
   };
 
+  // Open Email Preview Modal
+  const handleOpenEmailPreview = async (orderId?: string, targetEvent?: 'garba_groove' | 'navratri_utsav') => {
+    const ev = targetEvent || (selectedEvent === 'navratri_utsav' ? 'navratri_utsav' : 'garba_groove');
+    setPreviewEventTarget(ev);
+    setPreviewSelectedOrder(orderId || null);
+    setPreviewModalOpen(true);
+    setPreviewLoading(true);
+
+    try {
+      const url = orderId
+        ? `/api/email/preview?orderId=${encodeURIComponent(orderId)}&eventId=${ev}`
+        : `/api/email/preview?eventId=${ev}`;
+      const res = await fetch(url);
+      const data = await res.json();
+      if (data.success && data.html) {
+        setPreviewHtml(data.html);
+      } else {
+        setPreviewHtml(`<div style="color: #f87171; padding: 24px; font-family: sans-serif;">Failed to load preview: ${data.error || 'Unknown error'}</div>`);
+      }
+    } catch (err) {
+      setPreviewHtml(`<div style="color: #f87171; padding: 24px; font-family: sans-serif;">Error fetching preview: ${err instanceof Error ? err.message : String(err)}</div>`);
+    } finally {
+      setPreviewLoading(false);
+    }
+  };
+
+  // Batch Email Dispatcher with live chunking & progress updates
   const handleSendEmails = async (orderIds: string[]) => {
     if (orderIds.length === 0) return;
 
     type EmailDispatchResult = { orderId: string; status: string; error?: string };
 
     setEmailSending(true);
+    const targetEvent = selectedEvent === 'navratri_utsav' ? 'navratri_utsav' : 'garba_groove';
+    setDispatchProgress({ current: 0, total: orderIds.length, sent: 0, failed: 0 });
 
-    try {
-      const res = await fetch('/api/email', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ orderIds, eventId: selectedEvent })
-      });
+    const chunkSize = 20;
+    let totalSent = 0;
+    let totalFailed = 0;
 
-      const data = await res.json();
+    for (let i = 0; i < orderIds.length; i += chunkSize) {
+      const chunk = orderIds.slice(i, i + chunkSize);
 
-      if (data.success && data.results) {
-        setEmailResults(prev => {
-          const next = new Map(prev);
-          (data.results as EmailDispatchResult[]).forEach((r) => {
-            next.set(r.orderId, { status: r.status, error: r.error });
-          });
-          return next;
+      try {
+        const res = await fetch('/api/email', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ orderIds: chunk, eventId: targetEvent }),
         });
 
-        // Deselect successful ones
-        setSelectedPassIds(prev => {
-          const next = new Set(prev);
+        const data = await res.json();
+
+        if (data.success && data.results) {
           (data.results as EmailDispatchResult[]).forEach((r) => {
-            if (r.status === 'Sent') next.delete(r.orderId);
+            if (r.status === 'Sent') {
+              totalSent++;
+            } else {
+              totalFailed++;
+            }
           });
-          return next;
-        });
 
-        // Refresh passes to update status in DB
-        await fetchPasses(passSearch, passDivisionFilter, selectedEvent);
+          setEmailResults((prev) => {
+            const next = new Map(prev);
+            (data.results as EmailDispatchResult[]).forEach((r) => {
+              next.set(r.orderId, { status: r.status, error: r.error });
+            });
+            return next;
+          });
 
-        if (data.failed > 0) {
-          const sampleError = (data.results as EmailDispatchResult[]).find((r) => r.error)?.error || 'Unknown error';
-          alert(`Email Dispatch Result:\n✓ Sent: ${data.sent}\n✗ Failed: ${data.failed}\n\nReason for failure:\n${sampleError}`);
+          // Deselect successfully sent items
+          setSelectedPassIds((prev) => {
+            const next = new Set(prev);
+            (data.results as EmailDispatchResult[]).forEach((r) => {
+              if (r.status === 'Sent') next.delete(r.orderId);
+            });
+            return next;
+          });
+        } else {
+          totalFailed += chunk.length;
         }
-      } else {
-        alert(`Failed to send emails: ${data.error || 'Server error'}`);
+      } catch {
+        totalFailed += chunk.length;
       }
-    } catch (err: unknown) {
-      const message = err instanceof Error ? err.message : 'Unknown network error';
-      alert(`Error sending emails: ${message}`);
-    } finally {
-      setEmailSending(false);
+
+      setDispatchProgress({
+        current: Math.min(i + chunkSize, orderIds.length),
+        total: orderIds.length,
+        sent: totalSent,
+        failed: totalFailed,
+      });
     }
+
+    // Refresh passes after dispatch to sync state from database
+    await fetchPasses(passSearch, passDivisionFilter, selectedEvent, selectedDateFilter, selectedHourFilter);
+    setEmailSending(false);
   };
 
   // System Backend Info State
@@ -2307,23 +2353,61 @@ export default function Home() {
 
                 {/* Analysis KPI Metric Counters */}
                 <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
-                  <div className="bg-slate-950 p-3 rounded-xl border border-slate-800">
-                    <div className="text-[11px] text-slate-400">Total Rows in File</div>
-                    <div className="text-xl font-bold text-white">{analysis.totalRows}</div>
+                  <div className="bg-slate-950 p-3.5 rounded-xl border border-slate-800">
+                    <div className="text-[11px] text-slate-400 font-medium">Total Rows in File</div>
+                    <div className="text-xl font-bold text-white mt-0.5">{analysis.totalRows}</div>
+                    <div className="text-[10px] text-slate-500 mt-1">{analysis.capturedRows} valid captured</div>
                   </div>
-                  <div className="bg-slate-950 p-3 rounded-xl border border-slate-800">
-                    <div className="text-[11px] text-emerald-400">Valid Captured Rows</div>
-                    <div className="text-xl font-bold text-emerald-400">{analysis.capturedRows}</div>
+
+                  <div className="bg-slate-950 p-3.5 rounded-xl border border-emerald-500/30 bg-emerald-500/5">
+                    <div className="text-[11px] text-emerald-400 font-medium flex items-center justify-between">
+                      <span>New Rows to Ingest</span>
+                      <span className="text-[10px] px-1.5 py-0.2 rounded bg-emerald-500/20 text-emerald-300 font-bold">NEW</span>
+                    </div>
+                    <div className="text-xl font-bold text-emerald-400 mt-0.5">
+                      {analysis.newRecordsToImport}{' '}
+                      <span className="text-xs font-normal text-slate-400">/ {analysis.capturedRows}</span>
+                    </div>
+                    <div className="text-[10px] text-slate-400 mt-1">
+                      {analysis.totalDuplicatesToSkip > 0 ? (
+                        <span className="text-amber-400 font-medium">{analysis.totalDuplicatesToSkip} duplicates skipped</span>
+                      ) : (
+                        <span className="text-emerald-400/80">0 duplicates detected</span>
+                      )}
+                    </div>
                   </div>
-                  <div className="bg-slate-950 p-3 rounded-xl border border-amber-500/30 bg-amber-500/5">
-                    <div className="text-[11px] text-amber-400">Pass Items</div>
-                    <div className="text-xl font-bold text-amber-400">{analysis.totalPasses} passes</div>
-                    <div className="text-[10px] text-slate-400">{analysis.passTransactions} rows → Pass Table</div>
+
+                  <div className="bg-slate-950 p-3.5 rounded-xl border border-amber-500/30 bg-amber-500/5">
+                    <div className="text-[11px] text-amber-400 font-medium flex items-center justify-between">
+                      <span>New Passes</span>
+                      <span className="text-[10px] px-1.5 py-0.2 rounded bg-amber-500/20 text-amber-300 font-bold">NEW</span>
+                    </div>
+                    <div className="text-xl font-bold text-amber-400 mt-0.5">
+                      +{analysis.newPasses ?? analysis.totalPasses}{' '}
+                      <span className="text-xs font-normal text-slate-400">passes</span>
+                    </div>
+                    <div className="text-[10px] text-slate-400 mt-1">
+                      +{analysis.newPassTransactions ?? analysis.passTransactions} new rows
+                      {(analysis.existingPasses ?? 0) > 0 && (
+                        <span className="text-slate-500"> • {analysis.existingPasses} existing</span>
+                      )}
+                    </div>
                   </div>
-                  <div className="bg-slate-950 p-3 rounded-xl border border-rose-500/30 bg-rose-500/5">
-                    <div className="text-[11px] text-rose-400">Donation Items</div>
-                    <div className="text-xl font-bold text-rose-400">₹{analysis.totalDonationAmount.toLocaleString()}</div>
-                    <div className="text-[10px] text-slate-400">{analysis.donationTransactions} rows → Donation Table</div>
+
+                  <div className="bg-slate-950 p-3.5 rounded-xl border border-rose-500/30 bg-rose-500/5">
+                    <div className="text-[11px] text-rose-400 font-medium flex items-center justify-between">
+                      <span>New Donations</span>
+                      <span className="text-[10px] px-1.5 py-0.2 rounded bg-rose-500/20 text-rose-300 font-bold">NEW</span>
+                    </div>
+                    <div className="text-xl font-bold text-rose-400 mt-0.5">
+                      +₹{(analysis.newDonationAmount ?? analysis.totalDonationAmount).toLocaleString()}
+                    </div>
+                    <div className="text-[10px] text-slate-400 mt-1">
+                      +{analysis.newDonationTransactions ?? analysis.donationTransactions} new donors
+                      {(analysis.existingDonationAmount ?? 0) > 0 && (
+                        <span className="text-slate-500"> • ₹{analysis.existingDonationAmount.toLocaleString()} existing</span>
+                      )}
+                    </div>
                   </div>
                 </div>
 
@@ -2334,11 +2418,17 @@ export default function Home() {
                       <Ticket className="w-4 h-4" /> Pass Ingestion Preview
                     </div>
                     <div className="text-2xl font-extrabold text-white">
-                      {analysis.totalPasses} <span className="text-sm font-semibold text-slate-400">Passes</span>
+                      +{analysis.newPasses ?? analysis.totalPasses}{' '}
+                      <span className="text-sm font-semibold text-slate-400">New Passes</span>
                     </div>
                     <p className="text-xs text-slate-400 mt-0.5">
-                      from {analysis.passTransactions} transactions → Target Sheet: <strong className="text-amber-300">PASS TABLE</strong>
+                      from <strong className="text-amber-300">{analysis.newPassTransactions ?? analysis.passTransactions}</strong> new transactions → Target Sheet: <strong className="text-amber-300">PASS TABLE</strong>
                     </p>
+                    {(analysis.existingPasses ?? 0) > 0 && (
+                      <div className="mt-2.5 text-[11px] text-amber-300/80 bg-amber-500/10 border border-amber-500/20 px-2.5 py-1 rounded-lg">
+                        ℹ️ {analysis.existingPasses} passes ({analysis.existingPassTransactions} transactions) already exist in database and will be safely skipped.
+                      </div>
+                    )}
                   </div>
 
                   <div className="bg-slate-950 p-4 rounded-xl border border-rose-500/20">
@@ -2346,19 +2436,41 @@ export default function Home() {
                       <Heart className="w-4 h-4" /> Donation Ingestion Preview
                     </div>
                     <div className="text-2xl font-extrabold text-white">
-                      ₹{analysis.totalDonationAmount.toLocaleString()}
+                      +₹{(analysis.newDonationAmount ?? analysis.totalDonationAmount).toLocaleString()}
                     </div>
                     <p className="text-xs text-slate-400 mt-0.5">
-                      from {analysis.donationTransactions} donors → Target Sheet: <strong className="text-rose-300">DONATION TABLE</strong>
+                      from <strong className="text-rose-300">{analysis.newDonationTransactions ?? analysis.donationTransactions}</strong> new donors → Target Sheet: <strong className="text-rose-300">DONATION TABLE</strong>
                     </p>
+                    {(analysis.existingDonationAmount ?? 0) > 0 && (
+                      <div className="mt-2.5 text-[11px] text-rose-300/80 bg-rose-500/10 border border-rose-500/20 px-2.5 py-1 rounded-lg">
+                        ℹ️ ₹{analysis.existingDonationAmount.toLocaleString()} ({analysis.existingDonationTransactions} donors) already exist in database and will be safely skipped.
+                      </div>
+                    )}
                   </div>
                 </div>
 
                 {/* Stage 2 Action Bar */}
                 <div className="pt-4 border-t border-slate-800 flex flex-col sm:flex-row sm:items-center justify-between gap-3">
-                  <div className="text-xs text-emerald-400 font-medium flex items-center gap-2">
-                    <CheckCircle2 className="w-4 h-4 text-emerald-400 shrink-0" />
-                    <span>All {analysis.newRecordsToImport} captured rows will be sorted and ingested into respective event Pass & Donation tables.</span>
+                  <div className="text-xs font-medium flex items-center gap-2">
+                    {analysis.newRecordsToImport > 0 ? (
+                      <>
+                        <CheckCircle2 className="w-4 h-4 text-emerald-400 shrink-0" />
+                        <span className="text-emerald-400">
+                          Ready to ingest <strong>{analysis.newRecordsToImport}</strong> new records
+                          {analysis.totalDuplicatesToSkip > 0 && (
+                            <span className="text-slate-400 font-normal"> ({analysis.totalDuplicatesToSkip} duplicates will be skipped)</span>
+                          )}
+                          .
+                        </span>
+                      </>
+                    ) : (
+                      <>
+                        <Shield className="w-4 h-4 text-amber-400 shrink-0" />
+                        <span className="text-amber-300">
+                          All {analysis.capturedRows} valid records in this file are already imported in the database. No new records to ingest.
+                        </span>
+                      </>
+                    )}
                   </div>
 
                   <button
@@ -2370,9 +2482,13 @@ export default function Home() {
                       <>
                         <RefreshCw className="w-4 h-4 animate-spin" /> Ingesting & Sorting Records...
                       </>
+                    ) : analysis.newRecordsToImport > 0 ? (
+                      <>
+                        <Check className="w-4 h-4" /> Confirm & Ingest {analysis.newRecordsToImport} New Records
+                      </>
                     ) : (
                       <>
-                        <Check className="w-4 h-4" /> Confirm & Ingest All {analysis.newRecordsToImport} Records
+                        <Shield className="w-4 h-4" /> All Records Already Ingested
                       </>
                     )}
                   </button>
@@ -2410,230 +2526,528 @@ export default function Home() {
           </div>
         )}
 
-        {/* 4. PASS RECORDS TAB */}
-        {activeTab === 'passes' && (
-          <div className="space-y-4">
-            <div className="flex flex-col lg:flex-row lg:items-center justify-between gap-4 bg-slate-900/90 border border-slate-800 p-4 rounded-2xl">
-              <div>
-                <h3 className="text-base font-bold text-white flex items-center gap-2">
-                  <Ticket className="w-4 h-4 text-amber-400" /> Captured Pass Transactions
-                </h3>
-                <p className="text-xs text-slate-400">
-                  Showing all attendee pass orders ({passes.length} loaded records)
-                </p>
-              </div>
+        {/* 4. PASS RECORDS & EMAIL DISPATCH HUB */}
+        {activeTab === 'passes' && (() => {
+          const pendingPasses = passes.filter((p) => p.email_status === 'Pending' || !p.email_status);
+          const sentPasses = passes.filter((p) => p.email_status === 'Sent');
+          const failedPasses = passes.filter((p) => p.email_status === 'Failed');
+          const sentRate = passes.length > 0 ? Math.round((sentPasses.length / passes.length) * 100) : 0;
 
-              {/* Filters Toolbar */}
-              <div className="flex flex-wrap items-center gap-2.5">
-                {/* Search */}
-                <div className="relative">
-                  <Search className="w-4 h-4 absolute left-3 top-1/2 -translate-y-1/2 text-slate-400" />
-                  <input
-                    type="text"
-                    placeholder="Search order ID, attendee, email..."
-                    value={passSearch}
-                    onChange={(e) => {
-                      setPassSearch(e.target.value);
-                      void fetchPasses(e.target.value, passDivisionFilter, selectedEvent, selectedDateFilter, selectedHourFilter);
-                    }}
-                    className="pl-9 pr-4 py-1.5 rounded-xl bg-slate-950 border border-slate-800 text-xs text-slate-200 placeholder-slate-500 focus:outline-none focus:border-amber-500 w-48 sm:w-60"
-                  />
-                </div>
+          const filteredPasses = passes.filter((p) => {
+            if (passEmailFilter === 'pending') return p.email_status === 'Pending' || !p.email_status;
+            if (passEmailFilter === 'sent') return p.email_status === 'Sent';
+            if (passEmailFilter === 'failed') return p.email_status === 'Failed';
+            return true;
+          });
 
-                {/* Division Filter */}
-                <select
-                  value={passDivisionFilter}
-                  onChange={(e) => {
-                    setPassDivisionFilter(e.target.value);
-                    void fetchPasses(passSearch, e.target.value, selectedEvent, selectedDateFilter, selectedHourFilter);
-                  }}
-                  className="px-2.5 py-1.5 rounded-xl bg-slate-950 border border-slate-800 text-xs text-slate-300 focus:outline-none focus:border-amber-500"
-                >
-                  <option value="all">🏢 All Divisions</option>
-                  {(stats?.divisionStats || []).map((d) => (
-                    <option key={d.division} value={d.division}>
-                      {d.division} ({d.totalPasses}p)
-                    </option>
-                  ))}
-                </select>
+          const isNavratri = selectedEvent === 'navratri_utsav';
+          const currentEventName = isNavratri ? 'Navratri Utsav 2026' : 'Garba Groove 2026';
+          const currentEventDate = isNavratri ? '11 Oct 2026' : '10 Oct 2026';
 
-                {/* Date Dropdown */}
-                <select
-                  value={selectedDateFilter}
-                  onChange={(e) => {
-                    setSelectedDateFilter(e.target.value);
-                    void fetchPasses(passSearch, passDivisionFilter, selectedEvent, e.target.value, selectedHourFilter);
-                  }}
-                  className="px-2.5 py-1.5 rounded-xl bg-slate-950 border border-slate-800 text-xs text-slate-300 focus:outline-none focus:border-amber-500"
-                >
-                  <option value="all">📅 All Dates</option>
-                  {availableDates.map((day) => (
-                    <option key={day.date} value={day.date}>
-                      📅 {day.displayDate}
-                    </option>
-                  ))}
-                </select>
+          return (
+            <div className="space-y-5">
+              {/* Event Hub Selector & Overview Card */}
+              <div className="bg-slate-900/90 border border-slate-800 p-5 rounded-2xl">
+                <div className="flex flex-col md:flex-row md:items-center justify-between gap-4">
+                  <div>
+                    <div className="flex items-center gap-2 mb-1">
+                      <span className={`px-2.5 py-0.5 rounded-full text-xs font-bold ${isNavratri ? 'bg-purple-500/20 text-purple-300 border border-purple-500/30' : 'bg-amber-500/20 text-amber-300 border border-amber-500/30'}`}>
+                        {isNavratri ? '🪔 Navratri Utsav 2026' : '🌟 Garba Groove 2026'}
+                      </span>
+                      <span className="text-xs text-slate-400">• {currentEventDate} • Telangana Gardens</span>
+                    </div>
+                    <h3 className="text-lg font-bold text-white flex items-center gap-2">
+                      <Ticket className={`w-5 h-5 ${isNavratri ? 'text-purple-400' : 'text-amber-400'}`} />
+                      Pass Ingestion & Email Dispatch Hub
+                    </h3>
+                    <p className="text-xs text-slate-400 mt-0.5">
+                      Target event: <strong className={isNavratri ? 'text-purple-300' : 'text-amber-300'}>{currentEventName}</strong> ({passes.length} loaded records)
+                    </p>
+                  </div>
 
-                {/* Hourly Dropdown */}
-                <select
-                  value={selectedHourFilter}
-                  onChange={(e) => {
-                    setSelectedHourFilter(e.target.value);
-                    void fetchPasses(passSearch, passDivisionFilter, selectedEvent, selectedDateFilter, e.target.value);
-                  }}
-                  className="px-2.5 py-1.5 rounded-xl bg-slate-950 border border-slate-800 text-xs text-amber-300 font-semibold focus:outline-none focus:border-amber-500"
-                >
-                  <option value="all">⏰ All Hours (24h)</option>
-                  {ALL_HOURS_META.map((meta) => {
-                    const hStat = activeHourlyList.find((h) => h.hour === meta.hour);
-                    const txCount = hStat ? hStat.passTransactions : 0;
-                    return (
-                      <option key={meta.key} value={meta.key}>
-                        ⏰ {meta.hourDisplay} {txCount > 0 ? `(${txCount}p)` : ''}
-                      </option>
-                    );
-                  })}
-                </select>
+                  {/* Event Switcher Toggle & Preview Button */}
+                  <div className="flex flex-wrap items-center gap-2">
+                    <div className="flex items-center bg-slate-950 p-1 rounded-xl border border-slate-800">
+                      <button
+                        onClick={() => setSelectedEvent('garba_groove')}
+                        className={`px-3 py-1.5 rounded-lg text-xs font-bold transition flex items-center gap-1.5 ${
+                          selectedEvent === 'garba_groove'
+                            ? 'bg-amber-500 text-slate-950 shadow-md shadow-amber-500/20'
+                            : 'text-slate-400 hover:text-slate-200'
+                        }`}
+                      >
+                        🌟 Garba Groove
+                      </button>
+                      <button
+                        onClick={() => setSelectedEvent('navratri_utsav')}
+                        className={`px-3 py-1.5 rounded-lg text-xs font-bold transition flex items-center gap-1.5 ${
+                          selectedEvent === 'navratri_utsav'
+                            ? 'bg-purple-600 text-white shadow-md shadow-purple-600/20'
+                            : 'text-slate-400 hover:text-slate-200'
+                        }`}
+                      >
+                        🪔 Navratri Utsav
+                      </button>
+                    </div>
 
-                {(selectedDateFilter !== 'all' || selectedHourFilter !== 'all' || passDivisionFilter !== 'all') && (
-                  <button
-                    onClick={() => {
-                      setSelectedDateFilter('all');
-                      setSelectedHourFilter('all');
-                      setPassDivisionFilter('all');
-                      void fetchPasses(passSearch, 'all', selectedEvent, 'all', 'all');
-                    }}
-                    className="p-1.5 rounded-xl text-xs font-bold bg-rose-500/15 text-rose-300 border border-rose-500/30 hover:bg-rose-500/20 transition"
-                    title="Clear Filters"
-                  >
-                    <X className="w-3.5 h-3.5" />
-                  </button>
-                )}
-              </div>
-            </div>
-
-            {/* Passes Table */}
-            <div className="bg-slate-900/90 border border-slate-800 rounded-2xl overflow-hidden relative">
-              
-              {/* Floating Bulk Action Bar */}
-              {selectedPassIds.size > 0 && (
-                <div className="absolute top-0 left-0 right-0 bg-amber-500/10 border-b border-amber-500/30 p-3 flex items-center justify-between z-10 backdrop-blur-md">
-                  <div className="flex items-center gap-3">
-                    <span className="text-amber-400 font-medium text-sm">
-                      {selectedPassIds.size} passes selected
-                    </span>
-                    <button 
-                      onClick={() => setSelectedPassIds(new Set())}
-                      className="text-xs text-slate-400 hover:text-white"
+                    <button
+                      onClick={() => handleOpenEmailPreview(undefined, isNavratri ? 'navratri_utsav' : 'garba_groove')}
+                      className="px-3.5 py-2 rounded-xl text-xs font-bold bg-slate-800 hover:bg-slate-700 text-slate-200 border border-slate-700 flex items-center gap-1.5 transition"
                     >
-                      Clear
+                      <Eye className="w-3.5 h-3.5 text-amber-400" />
+                      Preview Pass Template
                     </button>
                   </div>
-                  <button
-                    onClick={() => handleSendEmails(Array.from(selectedPassIds))}
-                    disabled={emailSending}
-                    className="flex items-center gap-2 bg-amber-500 hover:bg-amber-400 text-slate-950 font-semibold px-4 py-1.5 rounded-lg text-sm transition disabled:opacity-50"
-                  >
-                    {emailSending ? (
-                      <RefreshCw className="w-4 h-4 animate-spin" />
-                    ) : (
-                      <Send className="w-4 h-4" />
+                </div>
+
+                {/* KPI Email Health Cards */}
+                <div className="grid grid-cols-2 sm:grid-cols-4 gap-3 mt-5">
+                  <div className="bg-slate-950 p-3.5 rounded-xl border border-slate-800">
+                    <div className="text-[11px] text-slate-400 font-medium">Total Passes</div>
+                    <div className="text-xl font-bold text-white mt-0.5">{passes.length}</div>
+                    <div className="text-[10px] text-slate-500 mt-1">100% captured</div>
+                  </div>
+
+                  <div className="bg-slate-950 p-3.5 rounded-xl border border-amber-500/30 bg-amber-500/5">
+                    <div className="text-[11px] text-amber-400 font-medium flex items-center justify-between">
+                      <span>⏳ Pending Email</span>
+                      <span className="text-[10px] px-1.5 py-0.2 rounded bg-amber-500/20 text-amber-300 font-bold">READY</span>
+                    </div>
+                    <div className="text-xl font-bold text-amber-400 mt-0.5">{pendingPasses.length}</div>
+                    <div className="text-[10px] text-slate-400 mt-1">Awaiting dispatch</div>
+                  </div>
+
+                  <div className="bg-slate-950 p-3.5 rounded-xl border border-emerald-500/30 bg-emerald-500/5">
+                    <div className="text-[11px] text-emerald-400 font-medium flex items-center justify-between">
+                      <span>✅ Already Sent</span>
+                      <span className="text-[10px] px-1.5 py-0.2 rounded bg-emerald-500/20 text-emerald-300 font-bold">{sentRate}%</span>
+                    </div>
+                    <div className="text-xl font-bold text-emerald-400 mt-0.5">{sentPasses.length}</div>
+                    <div className="text-[10px] text-emerald-400/80 mt-1">Delivered to attendees</div>
+                  </div>
+
+                  <div className="bg-slate-950 p-3.5 rounded-xl border border-rose-500/30 bg-rose-500/5">
+                    <div className="text-[11px] text-rose-400 font-medium flex items-center justify-between">
+                      <span>❌ Failed / Retry</span>
+                      {failedPasses.length > 0 && (
+                        <span className="text-[10px] px-1.5 py-0.2 rounded bg-rose-500/20 text-rose-300 font-bold">ALERT</span>
+                      )}
+                    </div>
+                    <div className="text-xl font-bold text-rose-400 mt-0.5">{failedPasses.length}</div>
+                    <div className="text-[10px] text-slate-400 mt-1">
+                      {failedPasses.length > 0 ? 'Requires resending' : 'No failed dispatches'}
+                    </div>
+                  </div>
+                </div>
+
+                {/* Smart Dispatch Action Bar */}
+                <div className="mt-5 pt-4 border-t border-slate-800 flex flex-wrap items-center justify-between gap-3">
+                  <div className="flex flex-wrap items-center gap-2">
+                    <button
+                      onClick={() => handleSendEmails(pendingPasses.map((p) => p.order_id))}
+                      disabled={emailSending || pendingPasses.length === 0}
+                      className="px-4 py-2 rounded-xl text-xs font-bold bg-gradient-to-r from-amber-500 to-orange-500 hover:from-amber-400 hover:to-orange-400 text-slate-950 flex items-center gap-2 shadow-lg shadow-amber-500/20 transition disabled:opacity-40"
+                    >
+                      {emailSending ? (
+                        <RefreshCw className="w-3.5 h-3.5 animate-spin" />
+                      ) : (
+                        <Send className="w-3.5 h-3.5" />
+                      )}
+                      🚀 Send All Pending ({pendingPasses.length})
+                    </button>
+
+                    {failedPasses.length > 0 && (
+                      <button
+                        onClick={() => handleSendEmails(failedPasses.map((p) => p.order_id))}
+                        disabled={emailSending}
+                        className="px-3.5 py-2 rounded-xl text-xs font-bold bg-rose-500/20 hover:bg-rose-500/30 text-rose-300 border border-rose-500/30 flex items-center gap-1.5 transition disabled:opacity-40"
+                      >
+                        <RefreshCw className="w-3.5 h-3.5" />
+                        🔄 Resend Failed ({failedPasses.length})
+                      </button>
                     )}
-                    {emailSending ? 'Sending...' : `Send Emails (${selectedPassIds.size})`}
-                  </button>
+
+                    {selectedPassIds.size > 0 && (
+                      <button
+                        onClick={() => handleSendEmails(Array.from(selectedPassIds))}
+                        disabled={emailSending}
+                        className="px-3.5 py-2 rounded-xl text-xs font-bold bg-amber-500/20 hover:bg-amber-500/30 text-amber-300 border border-amber-500/30 flex items-center gap-1.5 transition disabled:opacity-40"
+                      >
+                        <Mail className="w-3.5 h-3.5" />
+                        ✉️ Resend Selected ({selectedPassIds.size})
+                      </button>
+                    )}
+                  </div>
+
+                  {/* Status Filter Pills */}
+                  <div className="flex items-center gap-1.5 bg-slate-950 p-1 rounded-xl border border-slate-800">
+                    <button
+                      onClick={() => setPassEmailFilter('all')}
+                      className={`px-2.5 py-1 rounded-lg text-xs font-medium transition ${
+                        passEmailFilter === 'all'
+                          ? 'bg-slate-800 text-white font-bold'
+                          : 'text-slate-400 hover:text-slate-200'
+                      }`}
+                    >
+                      All ({passes.length})
+                    </button>
+                    <button
+                      onClick={() => setPassEmailFilter('pending')}
+                      className={`px-2.5 py-1 rounded-lg text-xs font-medium transition ${
+                        passEmailFilter === 'pending'
+                          ? 'bg-amber-500/20 text-amber-300 border border-amber-500/30 font-bold'
+                          : 'text-slate-400 hover:text-amber-300'
+                      }`}
+                    >
+                      ⏳ Pending ({pendingPasses.length})
+                    </button>
+                    <button
+                      onClick={() => setPassEmailFilter('sent')}
+                      className={`px-2.5 py-1 rounded-lg text-xs font-medium transition ${
+                        passEmailFilter === 'sent'
+                          ? 'bg-emerald-500/20 text-emerald-300 border border-emerald-500/30 font-bold'
+                          : 'text-slate-400 hover:text-emerald-300'
+                      }`}
+                    >
+                      ✅ Sent ({sentPasses.length})
+                    </button>
+                    <button
+                      onClick={() => setPassEmailFilter('failed')}
+                      className={`px-2.5 py-1 rounded-lg text-xs font-medium transition ${
+                        passEmailFilter === 'failed'
+                          ? 'bg-rose-500/20 text-rose-300 border border-rose-500/30 font-bold'
+                          : 'text-slate-400 hover:text-rose-300'
+                      }`}
+                    >
+                      ❌ Failed ({failedPasses.length})
+                    </button>
+                  </div>
+                </div>
+              </div>
+
+              {/* Table Toolbar (Search, Division, Date, Hour) */}
+              <div className="bg-slate-900/90 border border-slate-800 p-4 rounded-2xl flex flex-col lg:flex-row lg:items-center justify-between gap-4">
+                <div className="flex flex-wrap items-center gap-2.5">
+                  {/* Search */}
+                  <div className="relative">
+                    <Search className="w-4 h-4 absolute left-3 top-1/2 -translate-y-1/2 text-slate-400" />
+                    <input
+                      type="text"
+                      placeholder="Search order ID, attendee, email..."
+                      value={passSearch}
+                      onChange={(e) => {
+                        setPassSearch(e.target.value);
+                        void fetchPasses(e.target.value, passDivisionFilter, selectedEvent, selectedDateFilter, selectedHourFilter);
+                      }}
+                      className="pl-9 pr-4 py-1.5 rounded-xl bg-slate-950 border border-slate-800 text-xs text-slate-200 placeholder-slate-500 focus:outline-none focus:border-amber-500 w-48 sm:w-60"
+                    />
+                  </div>
+
+                  {/* Division Filter */}
+                  <select
+                    value={passDivisionFilter}
+                    onChange={(e) => {
+                      setPassDivisionFilter(e.target.value);
+                      void fetchPasses(passSearch, e.target.value, selectedEvent, selectedDateFilter, selectedHourFilter);
+                    }}
+                    className="px-2.5 py-1.5 rounded-xl bg-slate-950 border border-slate-800 text-xs text-slate-300 focus:outline-none focus:border-amber-500"
+                  >
+                    <option value="all">🏢 All Divisions</option>
+                    {(stats?.divisionStats || []).map((d) => (
+                      <option key={d.division} value={d.division}>
+                        {d.division} ({d.totalPasses}p)
+                      </option>
+                    ))}
+                  </select>
+
+                  {/* Date Dropdown */}
+                  <select
+                    value={selectedDateFilter}
+                    onChange={(e) => {
+                      setSelectedDateFilter(e.target.value);
+                      void fetchPasses(passSearch, passDivisionFilter, selectedEvent, e.target.value, selectedHourFilter);
+                    }}
+                    className="px-2.5 py-1.5 rounded-xl bg-slate-950 border border-slate-800 text-xs text-slate-300 focus:outline-none focus:border-amber-500"
+                  >
+                    <option value="all">📅 All Dates</option>
+                    {availableDates.map((day) => (
+                      <option key={day.date} value={day.date}>
+                        📅 {day.displayDate}
+                      </option>
+                    ))}
+                  </select>
+
+                  {/* Hourly Dropdown */}
+                  <select
+                    value={selectedHourFilter}
+                    onChange={(e) => {
+                      setSelectedHourFilter(e.target.value);
+                      void fetchPasses(passSearch, passDivisionFilter, selectedEvent, selectedDateFilter, e.target.value);
+                    }}
+                    className="px-2.5 py-1.5 rounded-xl bg-slate-950 border border-slate-800 text-xs text-amber-300 font-semibold focus:outline-none focus:border-amber-500"
+                  >
+                    <option value="all">⏰ All Hours (24h)</option>
+                    {ALL_HOURS_META.map((meta) => {
+                      const hStat = activeHourlyList.find((h) => h.hour === meta.hour);
+                      const txCount = hStat ? hStat.passTransactions : 0;
+                      return (
+                        <option key={meta.key} value={meta.key}>
+                          ⏰ {meta.hourDisplay} {txCount > 0 ? `(${txCount}p)` : ''}
+                        </option>
+                      );
+                    })}
+                  </select>
+
+                  {(selectedDateFilter !== 'all' || selectedHourFilter !== 'all' || passDivisionFilter !== 'all' || passEmailFilter !== 'all') && (
+                    <button
+                      onClick={() => {
+                        setSelectedDateFilter('all');
+                        setSelectedHourFilter('all');
+                        setPassDivisionFilter('all');
+                        setPassEmailFilter('all');
+                        void fetchPasses(passSearch, 'all', selectedEvent, 'all', 'all');
+                      }}
+                      className="p-1.5 rounded-xl text-xs font-bold bg-rose-500/15 text-rose-300 border border-rose-500/30 hover:bg-rose-500/20 transition"
+                      title="Clear All Filters"
+                    >
+                      <X className="w-3.5 h-3.5" />
+                    </button>
+                  )}
+                </div>
+
+                <div className="text-xs text-slate-400">
+                  Showing <strong className="text-white">{filteredPasses.length}</strong> of {passes.length} passes
+                </div>
+              </div>
+
+              {/* Passes Table */}
+              <div className="bg-slate-900/90 border border-slate-800 rounded-2xl overflow-hidden relative">
+                <div className="overflow-x-auto">
+                  <table className="w-full text-left text-xs">
+                    <thead className="bg-slate-950/80 text-slate-400 uppercase text-[10px] tracking-wider border-b border-slate-800">
+                      <tr>
+                        <th className="py-3 px-4 w-10">
+                          <input
+                            type="checkbox"
+                            checked={filteredPasses.length > 0 && selectedPassIds.size === filteredPasses.length}
+                            onChange={(e) => {
+                              if (e.target.checked) {
+                                setSelectedPassIds(new Set(filteredPasses.map((p) => p.order_id)));
+                              } else {
+                                setSelectedPassIds(new Set());
+                              }
+                            }}
+                            className="rounded border-slate-700 bg-slate-900 text-amber-500 focus:ring-amber-500 focus:ring-offset-slate-900"
+                          />
+                        </th>
+                        <th className="py-3 px-4">Order ID</th>
+                        <th className="py-3 px-4">Attendee Name</th>
+                        <th className="py-3 px-4">Email</th>
+                        <th className="py-3 px-4">Pass Item</th>
+                        <th className="py-3 px-4 text-center">Qty</th>
+                        <th className="py-3 px-4">Division</th>
+                        <th className="py-3 px-4">Email Status</th>
+                        <th className="py-3 px-4 text-right">Actions</th>
+                      </tr>
+                    </thead>
+                    <tbody className="divide-y divide-slate-800/60 text-slate-300">
+                      {filteredPasses.map((rec) => {
+                        const result = emailResults.get(rec.order_id);
+                        const status = result?.status || rec.email_status || 'Pending';
+                        const isSelected = selectedPassIds.has(rec.order_id);
+
+                        return (
+                          <tr
+                            key={rec.order_id}
+                            className={`hover:bg-slate-800/30 transition ${isSelected ? 'bg-amber-500/5' : ''}`}
+                          >
+                            <td className="py-3 px-4">
+                              <input
+                                type="checkbox"
+                                checked={isSelected}
+                                onChange={() => handleSelectPass(rec.order_id)}
+                                className="rounded border-slate-700 bg-slate-900 text-amber-500 focus:ring-amber-500 focus:ring-offset-slate-900"
+                              />
+                            </td>
+                            <td className="py-3 px-4 font-mono text-[11px] text-amber-400">{rec.order_id}</td>
+                            <td className="py-3 px-4 font-medium text-white">{rec.name || 'Anonymous'}</td>
+                            <td className="py-3 px-4 text-slate-400 text-[11px]">{rec.email || '-'}</td>
+                            <td className="py-3 px-4 text-slate-200">{rec.item_name}</td>
+                            <td className="py-3 px-4 text-center">
+                              <span className="px-2 py-0.5 rounded-full font-bold bg-amber-500/20 text-amber-300">
+                                {rec.item_quantity}
+                              </span>
+                            </td>
+                            <td className="py-3 px-4">
+                              <span className="px-2 py-0.5 rounded-md text-[11px] bg-slate-800 text-slate-300">
+                                {rec.divisions || 'Direct'}
+                              </span>
+                            </td>
+                            <td className="py-3 px-4">
+                              {status === 'Sent' ? (
+                                <span
+                                  className="inline-flex items-center gap-1.5 px-2 py-0.5 rounded-full text-[11px] font-semibold bg-emerald-500/15 text-emerald-400 border border-emerald-500/30"
+                                  title={rec.email_sent_at ? `Sent at: ${new Date(rec.email_sent_at).toLocaleString()}` : 'Pass Delivered'}
+                                >
+                                  <CheckCircle2 className="w-3 h-3 text-emerald-400" /> Sent
+                                </span>
+                              ) : status === 'Failed' ? (
+                                <span
+                                  className="inline-flex items-center gap-1.5 px-2 py-0.5 rounded-full text-[11px] font-semibold bg-rose-500/15 text-rose-400 border border-rose-500/30"
+                                  title={rec.email_error || result?.error || 'Failed to dispatch email'}
+                                >
+                                  <AlertCircle className="w-3 h-3 text-rose-400" /> Failed
+                                </span>
+                              ) : (
+                                <span className="inline-flex items-center gap-1.5 px-2 py-0.5 rounded-full text-[11px] font-semibold bg-slate-800 text-slate-400 border border-slate-700">
+                                  <Clock className="w-3 h-3 text-slate-400" /> Pending
+                                </span>
+                              )}
+                            </td>
+                            <td className="py-3 px-4 text-right">
+                              <div className="inline-flex items-center gap-1.5">
+                                <button
+                                  onClick={() => handleOpenEmailPreview(rec.order_id, isNavratri ? 'navratri_utsav' : 'garba_groove')}
+                                  className="p-1.5 rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-300 border border-slate-700 hover:text-amber-300 transition"
+                                  title="Preview Attendee Pass"
+                                >
+                                  <Eye className="w-3.5 h-3.5" />
+                                </button>
+                                <button
+                                  onClick={() => handleSendEmails([rec.order_id])}
+                                  disabled={emailSending}
+                                  className="p-1.5 rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-300 border border-slate-700 hover:text-emerald-300 transition disabled:opacity-50"
+                                  title={status === 'Sent' ? 'Resend Pass Email' : 'Send Pass Email'}
+                                >
+                                  <Mail className="w-3.5 h-3.5" />
+                                </button>
+                              </div>
+                            </td>
+                          </tr>
+                        );
+                      })}
+                    </tbody>
+                  </table>
+                </div>
+
+                {filteredPasses.length === 0 && (
+                  <div className="text-center py-12 text-slate-500 text-xs">
+                    No pass records matching the current filters.
+                  </div>
+                )}
+              </div>
+
+              {/* LIVE DISPATCH PROGRESS MODAL */}
+              {emailSending && dispatchProgress && (
+                <div className="fixed inset-0 bg-slate-950/80 backdrop-blur-md z-50 flex items-center justify-center p-4">
+                  <div className="bg-slate-900 border border-slate-800 rounded-2xl max-w-md w-full p-6 space-y-4 shadow-2xl animate-in fade-in">
+                    <div className="flex items-center justify-between">
+                      <h4 className="text-base font-bold text-white flex items-center gap-2">
+                        <RefreshCw className="w-4 h-4 animate-spin text-amber-400" />
+                        Dispatching Event Passes...
+                      </h4>
+                      <span className="text-xs font-mono font-bold text-amber-400">
+                        {Math.round((dispatchProgress.current / (dispatchProgress.total || 1)) * 100)}%
+                      </span>
+                    </div>
+
+                    <div className="w-full h-2 bg-slate-950 rounded-full overflow-hidden border border-slate-800">
+                      <div
+                        className="h-full bg-gradient-to-r from-amber-500 to-orange-500 transition-all duration-300"
+                        style={{
+                          width: `${Math.round((dispatchProgress.current / (dispatchProgress.total || 1)) * 100)}%`,
+                        }}
+                      />
+                    </div>
+
+                    <div className="flex items-center justify-between text-xs text-slate-400 pt-1">
+                      <span>Progress: {dispatchProgress.current} / {dispatchProgress.total}</span>
+                      <div className="flex items-center gap-3">
+                        <span className="text-emerald-400 font-medium">✓ {dispatchProgress.sent} Sent</span>
+                        <span className="text-rose-400 font-medium">✗ {dispatchProgress.failed} Failed</span>
+                      </div>
+                    </div>
+                  </div>
                 </div>
               )}
 
-              <div className="overflow-x-auto mt-2">
-                <table className="w-full text-left text-xs">
-                  <thead className="bg-slate-950/80 text-slate-400 uppercase text-[10px] tracking-wider border-b border-slate-800">
-                    <tr>
-                      <th className="py-3 px-4 w-10">
-                        <input 
-                          type="checkbox" 
-                          checked={passes.length > 0 && selectedPassIds.size === passes.length}
-                          onChange={handleSelectAllPasses}
-                          className="rounded border-slate-700 bg-slate-900 text-amber-500 focus:ring-amber-500 focus:ring-offset-slate-900"
-                        />
-                      </th>
-                      <th className="py-3 px-4">Order ID</th>
-                      <th className="py-3 px-4">Attendee Name</th>
-                      <th className="py-3 px-4">Email</th>
-                      <th className="py-3 px-4">Pass Item</th>
-                      <th className="py-3 px-4 text-center">Qty</th>
-                      <th className="py-3 px-4">Division</th>
-                      <th className="py-3 px-4">Email Status</th>
-                      <th className="py-3 px-4 text-right">Actions</th>
-                    </tr>
-                  </thead>
-                  <tbody className="divide-y divide-slate-800/60 text-slate-300">
-                    {passes.map((rec) => {
-                      const result = emailResults.get(rec.order_id);
-                      const status = result?.status || rec.email_status || 'Pending';
-                      
-                      return (
-                      <tr key={rec.order_id} className={`hover:bg-slate-800/30 transition ${selectedPassIds.has(rec.order_id) ? 'bg-amber-500/5' : ''}`}>
-                        <td className="py-3 px-4">
-                          <input 
-                            type="checkbox" 
-                            checked={selectedPassIds.has(rec.order_id)}
-                            onChange={() => handleSelectPass(rec.order_id)}
-                            className="rounded border-slate-700 bg-slate-900 text-amber-500 focus:ring-amber-500 focus:ring-offset-slate-900"
-                          />
-                        </td>
-                        <td className="py-3 px-4 font-mono text-[11px] text-amber-400">{rec.order_id}</td>
-                        <td className="py-3 px-4 font-medium text-white">{rec.name || 'Anonymous'}</td>
-                        <td className="py-3 px-4 text-slate-400 text-[11px]">{rec.email || '-'}</td>
-                        <td className="py-3 px-4 text-slate-200">{rec.item_name}</td>
-                        <td className="py-3 px-4 text-center">
-                          <span className="px-2 py-0.5 rounded-full font-bold bg-amber-500/20 text-amber-300">
-                            {rec.item_quantity}
-                          </span>
-                        </td>
-                        <td className="py-3 px-4">
-                          <span className="px-2 py-0.5 rounded-md text-[11px] bg-slate-800 text-slate-300">
-                            {rec.divisions || 'Direct'}
-                          </span>
-                        </td>
-                        <td className="py-3 px-4">
-                          {status === 'Sent' ? (
-                            <span className="flex items-center gap-1 text-emerald-400 text-[11px]">
-                              <CheckCircle2 className="w-3 h-3" /> Sent
-                            </span>
-                          ) : status === 'Failed' ? (
-                            <span className="flex items-center gap-1 text-rose-400 text-[11px]" title={result?.error || 'Unknown error'}>
-                              <AlertCircle className="w-3 h-3" /> Failed
-                            </span>
-                          ) : (
-                            <span className="flex items-center gap-1 text-slate-500 text-[11px]">
-                              <Clock className="w-3 h-3" /> Pending
-                            </span>
-                          )}
-                        </td>
-                        <td className="py-3 px-4 text-right">
+              {/* EMAIL PASS PREVIEW MODAL */}
+              {previewModalOpen && (
+                <div className="fixed inset-0 bg-slate-950/85 backdrop-blur-md z-50 flex items-center justify-center p-4">
+                  <div className="bg-slate-900 border border-slate-800 rounded-2xl max-w-2xl w-full max-h-[90vh] flex flex-col shadow-2xl overflow-hidden">
+                    {/* Header */}
+                    <div className="p-4 border-b border-slate-800 flex items-center justify-between bg-slate-950">
+                      <div className="flex items-center gap-2">
+                        <Ticket className={`w-4 h-4 ${previewEventTarget === 'navratri_utsav' ? 'text-purple-400' : 'text-amber-400'}`} />
+                        <h4 className="text-sm font-bold text-white">
+                          Email Pass Preview • {previewEventTarget === 'navratri_utsav' ? 'Navratri Utsav 2026' : 'Garba Groove 2026'}
+                        </h4>
+                      </div>
+
+                      <div className="flex items-center gap-2">
+                        <div className="flex items-center bg-slate-900 p-0.5 rounded-lg border border-slate-800 text-[11px]">
                           <button
-                            onClick={() => handleSendEmails([rec.order_id])}
-                            disabled={emailSending}
-                            className="inline-flex items-center justify-center p-1.5 rounded bg-slate-800 hover:bg-slate-700 text-slate-300 transition border border-slate-700 hover:border-slate-600 disabled:opacity-50"
-                            title="Resend Pass Email"
+                            onClick={() => handleOpenEmailPreview(previewSelectedOrder || undefined, 'garba_groove')}
+                            className={`px-2.5 py-1 rounded font-semibold transition ${
+                              previewEventTarget === 'garba_groove'
+                                ? 'bg-amber-500 text-slate-950'
+                                : 'text-slate-400 hover:text-white'
+                            }`}
                           >
-                            <Mail className="w-3.5 h-3.5" />
+                            Garba Groove
                           </button>
-                        </td>
-                      </tr>
-                      );
-                    })}
-                  </tbody>
-                </table>
-              </div>
-              {passes.length === 0 && (
-                <div className="text-center py-12 text-slate-500 text-xs">
-                  No pass records found.
+                          <button
+                            onClick={() => handleOpenEmailPreview(previewSelectedOrder || undefined, 'navratri_utsav')}
+                            className={`px-2.5 py-1 rounded font-semibold transition ${
+                              previewEventTarget === 'navratri_utsav'
+                                ? 'bg-purple-600 text-white'
+                                : 'text-slate-400 hover:text-white'
+                            }`}
+                          >
+                            Navratri Utsav
+                          </button>
+                        </div>
+
+                        <button
+                          onClick={() => setPreviewModalOpen(false)}
+                          className="p-1 rounded-lg text-slate-400 hover:text-white hover:bg-slate-800 transition"
+                        >
+                          <X className="w-4 h-4" />
+                        </button>
+                      </div>
+                    </div>
+
+                    {/* Preview Content */}
+                    <div className="flex-1 overflow-y-auto p-4 bg-slate-950/60">
+                      {previewLoading ? (
+                        <div className="flex flex-col items-center justify-center py-20 text-slate-400 text-xs">
+                          <RefreshCw className="w-6 h-6 animate-spin mb-2 text-amber-400" />
+                          Rendering Email Template...
+                        </div>
+                      ) : (
+                        <div
+                          className="rounded-xl overflow-hidden border border-slate-800 bg-white"
+                          dangerouslySetInnerHTML={{ __html: previewHtml }}
+                        />
+                      )}
+                    </div>
+
+                    {/* Footer */}
+                    <div className="p-3 border-t border-slate-800 bg-slate-950 flex items-center justify-between text-xs text-slate-400">
+                      <span>Live responsive email rendering with QR code and event styling.</span>
+                      <button
+                        onClick={() => setPreviewModalOpen(false)}
+                        className="px-4 py-1.5 rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-200 font-semibold transition"
+                      >
+                        Close Preview
+                      </button>
+                    </div>
+                  </div>
                 </div>
               )}
             </div>
-          </div>
-        )}
+          );
+        })()}
 
         {/* 5. DONATION RECORDS TAB */}
         {activeTab === 'donations' && (

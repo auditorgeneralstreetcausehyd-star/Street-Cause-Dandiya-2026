@@ -99,10 +99,21 @@ export async function analyzeExcelBuffer(
   let totalDonationAmount = 0;
   let unclassifiedRowsCount = 0;
 
+  // New vs Existing breakdowns
+  let newPasses = 0;
+  let newPassTransactions = 0;
+  let existingPasses = 0;
+  let existingPassTransactions = 0;
+  let newDonationAmount = 0;
+  let newDonationTransactions = 0;
+  let existingDonationAmount = 0;
+  let existingDonationTransactions = 0;
+
   const warnings: string[] = [];
   const fileRecordKeys = new Set<string>();
   let duplicatesInFile = 0;
   let existingDuplicatesCount = 0;
+  let totalDuplicatesToSkip = 0;
 
   const detectedEvents = new Set<'garba_groove' | 'navratri_utsav'>();
 
@@ -175,6 +186,7 @@ export async function analyzeExcelBuffer(
     }
 
     const recordType: RecordType = isPass ? 'PASS' : 'DONATION';
+    const rowDetectedEvent = detectedEvent || (targetEventId === 'all' ? 'garba_groove' : targetEventId);
 
     const qty = parseInt(rawQty, 10);
     const validQty = isNaN(qty) || qty <= 0 ? 1 : qty;
@@ -183,43 +195,75 @@ export async function analyzeExcelBuffer(
     }
 
     // Always read total_payment_amount first (as per Razorpay export format).
-    // Razorpay can put ₹1 marker in item_payment_amount, while real donation is in total_payment_amount.
     const totalAmt = parseFloat(rawTotalAmt) || parseFloat(rawItemAmt) || 0;
     const itemAmt = parseFloat(rawItemAmt) || totalAmt;
+
+    // Duplicate key format matching db.ts: eventId__recordType__orderId
+    const recordKey = `${rowDetectedEvent}__${recordType}__${orderId}`;
+    const isExistingInDb = existingRecordKeys.has(recordKey);
+    const isDuplicateInFile = fileRecordKeys.has(recordKey);
+    const isDuplicate = isExistingInDb || isDuplicateInFile;
+
+    if (isDuplicate) {
+      totalDuplicatesToSkip++;
+      if (isExistingInDb) {
+        existingDuplicatesCount++;
+      } else {
+        duplicatesInFile++;
+      }
+      if (previewDuplicates.length < 5) {
+        previewDuplicates.push({ order_id: orderId, name, item_name: itemName });
+      }
+    } else {
+      fileRecordKeys.add(recordKey);
+    }
 
     if (isPass) {
       passTransactions++;
       totalPasses += validQty;
-      if (previewPasses.length < 5) {
-        previewPasses.push({
-          order_id: orderId,
-          code: orderId,
-          name,
-          email,
-          item_name: itemName,
-          item_quantity: validQty,
-          item_payment_amount: itemAmt,
-          divisions,
-        });
+
+      if (!isDuplicate) {
+        newPassTransactions++;
+        newPasses += validQty;
+        if (previewPasses.length < 5) {
+          previewPasses.push({
+            order_id: orderId,
+            code: orderId,
+            name,
+            email,
+            item_name: itemName,
+            item_quantity: validQty,
+            item_payment_amount: itemAmt,
+            divisions,
+          });
+        }
+      } else {
+        existingPassTransactions++;
+        existingPasses += validQty;
       }
     } else if (isDonation) {
       donationTransactions++;
       totalDonationAmount += totalAmt;
-      if (previewDonations.length < 5) {
-        previewDonations.push({
-          order_id: orderId,
-          code: orderId,
-          name,
-          email,
-          item_name: itemName,
-          item_quantity: validQty,
-          item_payment_amount: totalAmt,
-          divisions,
-        });
+
+      if (!isDuplicate) {
+        newDonationTransactions++;
+        newDonationAmount += totalAmt;
+        if (previewDonations.length < 5) {
+          previewDonations.push({
+            order_id: orderId,
+            code: orderId,
+            name,
+            email,
+            item_name: itemName,
+            item_quantity: validQty,
+            item_payment_amount: totalAmt,
+            divisions,
+          });
+        }
+      } else {
+        existingDonationTransactions++;
+        existingDonationAmount += totalAmt;
       }
-    } else {
-      unclassifiedRowsCount++;
-      warnings.push(`Row ${i + 2} (${orderId}): Item name "${itemName}" could not be classified.`);
     }
   }
 
@@ -232,8 +276,7 @@ export async function analyzeExcelBuffer(
   }
 
   const finalEventName = finalEventId === 'navratri_utsav' ? 'Navratri Nirvana 2026' : 'Garba Groove 2026';
-  const totalDuplicatesToSkip = 0;
-  const newRecordsToImport = passTransactions + donationTransactions;
+  const newRecordsToImport = newPassTransactions + newDonationTransactions;
 
   return {
     fileName,
@@ -249,9 +292,19 @@ export async function analyzeExcelBuffer(
     totalPasses,
     donationTransactions,
     totalDonationAmount,
-    duplicatesInFile: 0,
-    existingDuplicatesCount: 0,
-    totalDuplicatesToSkip: 0,
+    newRowsCount: newRecordsToImport,
+    duplicateRowsCount: totalDuplicatesToSkip,
+    newPasses,
+    newPassTransactions,
+    existingPasses,
+    existingPassTransactions,
+    newDonationAmount,
+    newDonationTransactions,
+    existingDonationAmount,
+    existingDonationTransactions,
+    duplicatesInFile,
+    existingDuplicatesCount,
+    totalDuplicatesToSkip,
     newRecordsToImport,
     unclassifiedRowsCount,
     warnings: warnings.slice(0, 15),
@@ -301,10 +354,10 @@ export async function processAndImportExcel(
     event_name: batchEventName,
     total_rows: analysis.totalRows,
     captured_rows: analysis.capturedRows,
-    pass_transactions: analysis.passTransactions,
-    total_passes: analysis.totalPasses,
-    donation_transactions: analysis.donationTransactions,
-    total_donation_amount: analysis.totalDonationAmount,
+    pass_transactions: analysis.newPassTransactions,
+    total_passes: analysis.newPasses,
+    donation_transactions: analysis.newDonationTransactions,
+    total_donation_amount: analysis.newDonationAmount,
     duplicates_skipped: analysis.totalDuplicatesToSkip,
     errors_count: analysis.unclassifiedRowsCount,
     status: 'PROCESSING',
@@ -341,14 +394,19 @@ export async function processAndImportExcel(
 
     const qty = parseInt(rawQty, 10);
     const validQty = isNaN(qty) || qty <= 0 ? 1 : qty;
-    // Always read total_payment_amount first (as per Razorpay export format).
-    // Razorpay can put ₹1 marker in item_payment_amount, while real donation is in total_payment_amount.
     const totalAmt = parseFloat(rawTotalAmt) || parseFloat(rawItemAmt) || 0;
     const itemAmt = parseFloat(rawItemAmt) || totalAmt;
 
     // Per-row event classification validation
     const rowDetectedEvent = classifyEventFromTitle(paymentPageTitle) || batchEventId;
     const rowEventName = rowDetectedEvent === 'navratri_utsav' ? 'Navratri Nirvana 2026' : 'Garba Groove 2026';
+
+    const recordKey = `${rowDetectedEvent}__${recordType}__${orderId}`;
+    if (existingRecordKeys.has(recordKey) || seenInBatch.has(recordKey)) {
+      // Duplicate skip
+      continue;
+    }
+    seenInBatch.add(recordKey);
 
     const record: EventRecord = {
       id: `rec_${Date.now()}_${i}_${Math.random().toString(36).substring(2, 8)}`,
@@ -387,8 +445,10 @@ export async function processAndImportExcel(
     recordsToInsert.push(record);
   }
 
-  // Insert into Primary Database (Supabase)
-  await insertEventRecords(recordsToInsert);
+  // Insert into Primary Database (Supabase / Local)
+  if (recordsToInsert.length > 0) {
+    await insertEventRecords(recordsToInsert);
+  }
 
   // Mark Batch as COMPLETED
   await updateImportBatch(batchId, {
@@ -404,9 +464,10 @@ export async function processAndImportExcel(
 
   const syncResult = {
     success: true,
-    message: `Successfully imported ${recordsToInsert.length} records into Supabase for ${batchEventName}.`,
+    message: `Successfully imported ${recordsToInsert.length} new records (${analysis.totalDuplicatesToSkip} duplicates skipped) for ${batchEventName}.`,
     rowsSynced: recordsToInsert.length,
   };
 
   return { batch: completedBatch, syncResult };
 }
+

@@ -48,10 +48,10 @@ export async function POST(request: NextRequest) {
     for (const res of results) {
       if (res.status === 'Sent') {
         sentCount++;
-        await updateRecordEmailStatus(res.orderId, 'Sent', now);
+        await updateRecordEmailStatus(res.orderId, 'Sent', now, now, null);
       } else {
         failedCount++;
-        await updateRecordEmailStatus(res.orderId, 'Failed', null);
+        await updateRecordEmailStatus(res.orderId, 'Failed', null, now, res.error || 'Failed to dispatch email');
       }
     }
 

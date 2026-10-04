@@ -7,6 +7,7 @@ import {
   DayDivisionStat,
   DayWiseStat,
   DivisionStats,
+  EmailStatus,
   EventRecord,
   ImportBatch,
   ImportError,
@@ -661,7 +662,34 @@ export function computeDayWiseStats(records: EventRecord[]): DayWiseStat[] {
   return result.sort((a, b) => b.date.localeCompare(a.date));
 }
 
-// Compute Division Wise Statistics with Daily Trajectory
+// Helper: Format volunteer display name in proper Title Case
+export function formatVolunteerDisplayName(name: string): string {
+  if (!name || name.trim() === '') return 'Direct';
+  const clean = name.trim().replace(/\s+/g, ' ');
+  if (['direct', 'unassigned', 'none', 'null', 'undefined', 'n/a', '-'].includes(clean.toLowerCase())) {
+    return 'Direct';
+  }
+  return clean
+    .split(' ')
+    .map((w) => (w.length > 0 ? w.charAt(0).toUpperCase() + w.slice(1).toLowerCase() : ''))
+    .join(' ');
+}
+
+// Helper: Normalize volunteer key for case and symbol agnostic matching
+export function normalizeVolunteerKey(name: string): string {
+  if (!name) return 'direct';
+  const clean = name
+    .toLowerCase()
+    .trim()
+    .replace(/[^a-z0-9\s]/g, '')
+    .replace(/\s+/g, ' ');
+  if (['direct', 'unassigned', 'none', 'null', 'undefined', 'na', ''].includes(clean)) {
+    return 'direct';
+  }
+  return clean;
+}
+
+// Compute Division Wise Statistics with Daily Trajectory and Intelligent Volunteer Deduplication
 export function computeDivisionStats(records: EventRecord[]): DivisionStats[] {
   const map = new Map<
     string,
@@ -670,10 +698,11 @@ export function computeDivisionStats(records: EventRecord[]): DivisionStats[] {
       totalPasses: number;
       donationTransactions: number;
       totalDonationAmount: number;
-      volunteers: Map<
+      rawVolunteers: Map<
         string,
         {
-          name: string;
+          normKey: string;
+          displayNames: Map<string, number>; // name variation -> count
           l2Set: Set<string>;
           passes: number;
           passTransactions: number;
@@ -696,18 +725,20 @@ export function computeDivisionStats(records: EventRecord[]): DivisionStats[] {
         totalPasses: 0,
         donationTransactions: 0,
         totalDonationAmount: 0,
-        volunteers: new Map(),
+        rawVolunteers: new Map(),
         dayTrend: new Map(),
       });
     }
 
     const item = map.get(divName)!;
-    const volName = (r.referred_volunteer || '').trim() || 'Direct';
-    const l2Name = (r.l2 || '').trim();
+    const rawVolName = (r.referred_volunteer || '').trim() || 'Direct';
+    const normKey = normalizeVolunteerKey(rawVolName);
+    const rawL2 = (r.l2 || '').trim();
 
-    if (!item.volunteers.has(volName)) {
-      item.volunteers.set(volName, {
-        name: volName,
+    if (!item.rawVolunteers.has(normKey)) {
+      item.rawVolunteers.set(normKey, {
+        normKey,
+        displayNames: new Map(),
         l2Set: new Set(),
         passes: 0,
         passTransactions: 0,
@@ -715,9 +746,14 @@ export function computeDivisionStats(records: EventRecord[]): DivisionStats[] {
         donationTransactions: 0,
       });
     }
-    const vol = item.volunteers.get(volName)!;
-    if (l2Name && l2Name !== 'null' && l2Name !== 'undefined') {
-      vol.l2Set.add(l2Name);
+    const vol = item.rawVolunteers.get(normKey)!;
+
+    // Track original display name frequency for best canonical casing selection
+    const formattedDisplay = formatVolunteerDisplayName(rawVolName);
+    vol.displayNames.set(formattedDisplay, (vol.displayNames.get(formattedDisplay) || 0) + 1);
+
+    if (rawL2 && rawL2 !== 'null' && rawL2 !== 'undefined' && rawL2 !== '-') {
+      vol.l2Set.add(rawL2.toUpperCase());
     }
 
     if (!item.dayTrend.has(isoDate)) {
@@ -743,10 +779,102 @@ export function computeDivisionStats(records: EventRecord[]): DivisionStats[] {
   }
 
   const result: DivisionStats[] = [];
+
   for (const [division, data] of map.entries()) {
-    const allVolunteers: VolunteerStat[] = Array.from(data.volunteers.values())
+    // PASS 2: Consolidate single-word or partial aliases (e.g. "Simran" -> "Simran Gupta")
+    // Find all multi-word volunteer keys in this division
+    const allNormKeys = Array.from(data.rawVolunteers.keys());
+    const multiWordKeys = allNormKeys.filter((k) => k !== 'direct' && k.includes(' '));
+
+    // Map of alias key -> target canonical key
+    const aliasMap = new Map<string, string>();
+
+    for (const key of allNormKeys) {
+      if (key === 'direct') continue;
+
+      // If key is a single word (e.g. "simran") or shortened initial (e.g. "simran g")
+      if (!key.includes(' ')) {
+        // Find matching candidates that start with "${key} "
+        const candidates = multiWordKeys.filter((mw) => mw.startsWith(`${key} `));
+
+        // If there's an exact single candidate under this division, merge them!
+        if (candidates.length === 1) {
+          aliasMap.set(key, candidates[0]);
+        } else if (candidates.length > 1) {
+          // If multiple, check if L2 matches exclusively
+          const volL2Set = data.rawVolunteers.get(key)!.l2Set;
+          const l2Filtered = candidates.filter((mw) => {
+            const mwL2Set = data.rawVolunteers.get(mw)!.l2Set;
+            for (const l2 of volL2Set) {
+              if (mwL2Set.has(l2)) return true;
+            }
+            return false;
+          });
+          if (l2Filtered.length === 1) {
+            aliasMap.set(key, l2Filtered[0]);
+          }
+        }
+      } else {
+        // Check for initial matching, e.g. "simran g" -> "simran gupta"
+        const parts = key.split(' ');
+        if (parts.length === 2 && parts[1].length === 1) {
+          const prefix = `${parts[0]} ${parts[1]}`;
+          const candidates = multiWordKeys.filter((mw) => mw !== key && mw.startsWith(prefix));
+          if (candidates.length === 1) {
+            aliasMap.set(key, candidates[0]);
+          }
+        }
+      }
+    }
+
+    // Consolidated volunteers map
+    const consolidated = new Map<
+      string,
+      {
+        canonicalName: string;
+        l2Set: Set<string>;
+        passes: number;
+        passTransactions: number;
+        donations: number;
+        donationTransactions: number;
+      }
+    >();
+
+    for (const [key, rawVol] of data.rawVolunteers.entries()) {
+      const targetKey = aliasMap.get(key) || key;
+
+      if (!consolidated.has(targetKey)) {
+        // Pick best display name for target
+        const targetRaw = data.rawVolunteers.get(targetKey);
+        let bestName = 'Direct';
+        if (targetRaw) {
+          const sortedNames = Array.from(targetRaw.displayNames.entries()).sort((a, b) => b[1] - a[1]);
+          bestName = sortedNames[0]?.[0] || formatVolunteerDisplayName(targetKey);
+        } else {
+          bestName = formatVolunteerDisplayName(targetKey);
+        }
+
+        consolidated.set(targetKey, {
+          canonicalName: bestName,
+          l2Set: new Set(),
+          passes: 0,
+          passTransactions: 0,
+          donations: 0,
+          donationTransactions: 0,
+        });
+      }
+
+      const cEntry = consolidated.get(targetKey)!;
+      cEntry.passes += rawVol.passes;
+      cEntry.passTransactions += rawVol.passTransactions;
+      cEntry.donations += rawVol.donations;
+      cEntry.donationTransactions += rawVol.donationTransactions;
+      rawVol.l2Set.forEach((l2) => cEntry.l2Set.add(l2));
+    }
+
+    const allVolunteers: VolunteerStat[] = Array.from(consolidated.values())
       .map((v) => ({
-        name: v.name,
+        name: v.canonicalName,
         l2: Array.from(v.l2Set).join(', ') || '-',
         division: division,
         passes: v.passes,
@@ -773,7 +901,7 @@ export function computeDivisionStats(records: EventRecord[]): DivisionStats[] {
       totalDonationAmount: data.totalDonationAmount,
       totalRevenue: data.totalDonationAmount,
       totalTransactions: data.passTransactions + data.donationTransactions,
-      volunteersCount: data.volunteers.size,
+      volunteersCount: consolidated.size,
       topVolunteers,
       allVolunteers,
       dayWiseTrend,
@@ -1000,15 +1128,33 @@ export async function getRecordsByOrderIds(orderIds: string[]): Promise<EventRec
 }
 
 // Update Email Status across all 4 active tables
-export async function updateRecordEmailStatus(orderId: string, status: 'Pending' | 'Sent' | 'Failed', sentAt: string | null = null): Promise<void> {
+export async function updateRecordEmailStatus(
+  orderId: string,
+  status: EmailStatus,
+  sentAt: string | null = null,
+  lastAttemptAt: string | null = null,
+  errorMessage: string | null = null
+): Promise<void> {
+  const attemptTime = lastAttemptAt || new Date().toISOString();
+  const updatePayload: Record<string, unknown> = {
+    email_status: status,
+    email_last_attempt_at: attemptTime,
+    email_error: errorMessage || null,
+  };
+
+  if (status === 'Sent') {
+    updatePayload.email_sent_at = sentAt || attemptTime;
+    updatePayload.email_error = null;
+  }
+
   const client = getSupabaseClient();
   if (isUsingSupabase() && client) {
     try {
       await Promise.allSettled([
-        client.from('garba_groove_passes').update({ email_status: status, email_sent_at: sentAt }).eq('order_id', orderId),
-        client.from('garba_groove_donations').update({ email_status: status, email_sent_at: sentAt }).eq('order_id', orderId),
-        client.from('navratri_utsav_passes').update({ email_status: status, email_sent_at: sentAt }).eq('order_id', orderId),
-        client.from('navratri_utsav_donations').update({ email_status: status, email_sent_at: sentAt }).eq('order_id', orderId),
+        client.from('garba_groove_passes').update(updatePayload).eq('order_id', orderId),
+        client.from('garba_groove_donations').update(updatePayload).eq('order_id', orderId),
+        client.from('navratri_utsav_passes').update(updatePayload).eq('order_id', orderId),
+        client.from('navratri_utsav_donations').update(updatePayload).eq('order_id', orderId),
       ]);
     } catch (err) {
       console.warn('Supabase updateRecordEmailStatus error:', err);
@@ -1018,7 +1164,13 @@ export async function updateRecordEmailStatus(orderId: string, status: 'Pending'
   const local = readLocalDb();
   const idx = local.records.findIndex((r) => r.order_id === orderId);
   if (idx !== -1) {
-    local.records[idx] = { ...local.records[idx], email_status: status, email_sent_at: sentAt };
+    local.records[idx] = {
+      ...local.records[idx],
+      email_status: status,
+      email_last_attempt_at: attemptTime,
+      email_error: errorMessage || null,
+      ...(status === 'Sent' ? { email_sent_at: sentAt || attemptTime, email_error: null } : {}),
+    };
     writeLocalDb(local);
   }
 }

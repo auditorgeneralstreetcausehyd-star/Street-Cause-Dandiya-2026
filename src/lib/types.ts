@@ -2,7 +2,7 @@ export type RecordType = 'PASS' | 'DONATION';
 
 export type BatchStatus = 'PROCESSING' | 'VALIDATED' | 'SYNCING' | 'COMPLETED' | 'FAILED';
 
-export type EmailStatus = 'Pending' | 'Sent' | 'Failed';
+export type EmailStatus = 'Pending' | 'Sending' | 'Sent' | 'Failed';
 
 export type EventId = 'garba_groove' | 'navratri_utsav' | 'all';
 
@@ -127,6 +127,8 @@ export interface EventRecord {
   import_batch_id: string;
   email_status: EmailStatus;
   email_sent_at?: string | null;
+  email_last_attempt_at?: string | null;
+  email_error?: string | null;
   attendance_status?: 'PENDING' | 'PRESENT' | 'CANCELLED';
   checked_in_at?: string | null;
   created_at: string;
@@ -219,6 +221,16 @@ export interface PreImportAnalysis {
   totalPasses: number;
   donationTransactions: number;
   totalDonationAmount: number;
+  newRowsCount: number;
+  duplicateRowsCount: number;
+  newPasses: number;
+  newPassTransactions: number;
+  existingPasses: number;
+  existingPassTransactions: number;
+  newDonationAmount: number;
+  newDonationTransactions: number;
+  existingDonationAmount: number;
+  existingDonationTransactions: number;
   duplicatesInFile: number;
   existingDuplicatesCount: number;
   totalDuplicatesToSkip: number;
@@ -229,3 +241,4 @@ export interface PreImportAnalysis {
   previewDonations: Partial<EventRecord>[];
   previewDuplicates: { order_id: string; name?: string; item_name?: string }[];
 }
+
