@@ -1,7 +1,25 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { getRecordByCode, updateAttendanceStatus } from '@/lib/db';
+import { checkRateLimit, isRateLimited } from '@/lib/rateLimit';
 
 const ADMIN_PASSCODE = process.env.ADMIN_VERIFY_PASSCODE || process.env.ADMIN_PASSCODE || 'admin123';
+
+// Only wrong passcodes count, so busy gate phones sharing the venue IP aren't throttled during normal scanning
+const PASSCODE_FAIL_LIMIT = { limit: 20, windowSeconds: 15 * 60 };
+
+async function rejectPasscode(request: NextRequest, passcode: string | null | undefined): Promise<NextResponse | null> {
+  if (await isRateLimited(request, 'verify_passcode_fail', PASSCODE_FAIL_LIMIT)) {
+    return NextResponse.json(
+      { success: false, error: 'Too many wrong passcode attempts from this network. Try again in 15 minutes.' },
+      { status: 429 }
+    );
+  }
+  if (passcode !== ADMIN_PASSCODE) {
+    await checkRateLimit(request, 'verify_passcode_fail', PASSCODE_FAIL_LIMIT);
+    return NextResponse.json({ success: false, error: 'Unauthorized: Invalid Admin Passcode', isAuthError: true }, { status: 401 });
+  }
+  return null;
+}
 
 export async function GET(request: NextRequest) {
   try {
@@ -14,9 +32,8 @@ export async function GET(request: NextRequest) {
     }
 
     // Check Admin Passcode Authorization
-    if (passcode !== ADMIN_PASSCODE) {
-      return NextResponse.json({ success: false, error: 'Unauthorized: Invalid Admin Passcode', isAuthError: true }, { status: 401 });
-    }
+    const rejected = await rejectPasscode(request, passcode);
+    if (rejected) return rejected;
 
     const record = await getRecordByCode(code.trim());
     if (!record) {
@@ -58,9 +75,8 @@ export async function POST(request: NextRequest) {
 
     const authPasscode = passcode || request.headers.get('x-admin-passcode');
 
-    if (authPasscode !== ADMIN_PASSCODE) {
-      return NextResponse.json({ success: false, error: 'Unauthorized: Invalid Admin Passcode', isAuthError: true }, { status: 401 });
-    }
+    const rejected = await rejectPasscode(request, authPasscode);
+    if (rejected) return rejected;
 
     if (!code || !status || !['PRESENT', 'CANCELLED', 'PENDING'].includes(status)) {
       return NextResponse.json({ success: false, error: 'Invalid parameters provided' }, { status: 400 });

@@ -7,7 +7,7 @@ import { invalidateCache } from '@/lib/cache';
 export async function POST(req: NextRequest) {
   try {
     // 1. Rate Limiting: 10 per minute
-    const rateCheck = checkRateLimit(req, 'api_import', { limit: 10, windowSeconds: 60 });
+    const rateCheck = await checkRateLimit(req, 'api_import', { limit: 10, windowSeconds: 60 });
     if (!rateCheck.allowed && rateCheck.response) {
       return rateCheck.response;
     }

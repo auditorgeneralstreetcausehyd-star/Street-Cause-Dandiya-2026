@@ -4,11 +4,12 @@ import { RecordType } from '@/lib/types';
 import { requireAuth } from '@/lib/auth';
 import { checkRateLimit } from '@/lib/rateLimit';
 import { getOrSetCache, invalidateCache } from '@/lib/cache';
+import { attachEmailSenders } from '@/lib/emailWorker';
 
 export async function GET(req: NextRequest) {
   try {
     // 1. Rate Limiting: 120 per minute
-    const rateCheck = checkRateLimit(req, 'api_records', { limit: 120, windowSeconds: 60 });
+    const rateCheck = await checkRateLimit(req, 'api_records', { limit: 120, windowSeconds: 60 });
     if (!rateCheck.allowed && rateCheck.response) {
       return rateCheck.response;
     }
@@ -40,7 +41,10 @@ export async function GET(req: NextRequest) {
     // 3. Cached fetch (30 seconds TTL)
     const { data: result, isCached, ageSeconds } = await getOrSetCache(
       cacheKey,
-      () => getRecords({ type, eventId, division, date, hour, search, limit, offset }),
+      async () => {
+        const result = await getRecords({ type, eventId, division, date, hour, search, limit, offset });
+        return { ...result, records: await attachEmailSenders(result.records) };
+      },
       30
     );
 

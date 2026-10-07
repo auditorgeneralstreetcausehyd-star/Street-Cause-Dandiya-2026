@@ -7,7 +7,7 @@ import { getOrSetCache, invalidateCache } from '@/lib/cache';
 export async function GET(req: NextRequest) {
   try {
     // 1. Rate Limiting: 120 requests per minute
-    const rateCheck = checkRateLimit(req, 'api_stats', { limit: 120, windowSeconds: 60 });
+    const rateCheck = await checkRateLimit(req, 'api_stats', { limit: 120, windowSeconds: 60 });
     if (!rateCheck.allowed && rateCheck.response) {
       return rateCheck.response;
     }

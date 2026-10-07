@@ -23,7 +23,7 @@ export async function GET(req: NextRequest) {
 
 export async function POST(req: NextRequest) {
   try {
-    const rateCheck = checkRateLimit(req, 'api_settings_post', { limit: 30, windowSeconds: 60 });
+    const rateCheck = await checkRateLimit(req, 'api_settings_post', { limit: 30, windowSeconds: 60 });
     if (!rateCheck.allowed && rateCheck.response) {
       return rateCheck.response;
     }

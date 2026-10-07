@@ -24,7 +24,8 @@ const DEFAULT_SETTINGS: SystemSettings = {
   donationKeywords: ['donation', 'donate', 'daan', 'seva', 'contribut', 'sponsorship', 'support'],
   garbaGrooveSpreadsheetId: '',
   navratriUtsavSpreadsheetId: '',
-  navratriPassBgUrl: 'https://res.cloudinary.com/dhrj3rpg8/image/upload/v1789971984/EVENT_PASS.png',
+  garbaPassBgUrl: 'https://res.cloudinary.com/ygf4cf8x/image/upload/v1791352492/Garba_Groove_Bg.png',
+  navratriPassBgUrl: 'https://res.cloudinary.com/ygf4cf8x/image/upload/v1791352481/Navratri_utsav_BG.png',
 };
 
 // Local database file path & fallback
@@ -37,6 +38,8 @@ interface LocalDatabase {
   records: EventRecord[];
   errors: ImportError[];
   settings: SystemSettings;
+  email_batches?: import('./types').EmailBatch[];
+  email_dispatch_logs?: import('./types').EmailDispatchLog[];
 }
 
 let inMemoryDb: LocalDatabase | null = null;
@@ -75,6 +78,8 @@ function readLocalDb(): LocalDatabase {
     records: [],
     errors: [],
     settings: DEFAULT_SETTINGS,
+    email_batches: [],
+    email_dispatch_logs: [],
   };
 
   let db: LocalDatabase = initial;
@@ -90,6 +95,8 @@ function readLocalDb(): LocalDatabase {
           records: Array.isArray(parsed.records) ? parsed.records : [],
           errors: Array.isArray(parsed.errors) ? parsed.errors : [],
           settings: { ...DEFAULT_SETTINGS, ...(parsed.settings || {}) },
+          email_batches: Array.isArray(parsed.email_batches) ? parsed.email_batches : [],
+          email_dispatch_logs: Array.isArray(parsed.email_dispatch_logs) ? parsed.email_dispatch_logs : [],
         };
         break;
       }
@@ -144,9 +151,13 @@ let supabaseInstance: SupabaseClient | null = null;
 
 export function getSupabaseClient(): SupabaseClient | null {
   const url = process.env.NEXT_PUBLIC_SUPABASE_URL;
-  const key = process.env.SUPABASE_SERVICE_ROLE_KEY || process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY;
+  // Server-only service role key. The anon key is denied by RLS (see supabase/security_hardening.sql).
+  const key = process.env.SUPABASE_SERVICE_ROLE_KEY;
 
   if (!url || !key || url.trim() === '' || key.trim() === '') {
+    if (url && process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY && !key) {
+      console.error('SUPABASE_SERVICE_ROLE_KEY is not set; Supabase is disabled and the local JSON store is used instead.');
+    }
     return null;
   }
 
@@ -173,7 +184,7 @@ export function isUsingSupabase(): boolean {
 export async function testSupabaseConnection(overrideUrl?: string, overrideKey?: string): Promise<{ success: boolean; message: string }> {
   try {
     const url = overrideUrl || process.env.NEXT_PUBLIC_SUPABASE_URL;
-    const key = overrideKey || process.env.SUPABASE_SERVICE_ROLE_KEY || process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY;
+    const key = overrideKey || process.env.SUPABASE_SERVICE_ROLE_KEY;
     if (!url || !key) {
       return { success: false, message: 'Supabase URL and Key are required.' };
     }
@@ -195,6 +206,48 @@ export function getRecordTableName(eventId?: string, recordType: 'PASS' | 'DONAT
     return recordType === 'DONATION' ? 'navratri_utsav_donations' : 'navratri_utsav_passes';
   }
   return recordType === 'DONATION' ? 'garba_groove_donations' : 'garba_groove_passes';
+}
+
+const ALL_RECORD_TABLES = [
+  'garba_groove_passes',
+  'garba_groove_donations',
+  'navratri_utsav_passes',
+  'navratri_utsav_donations',
+] as const;
+
+// Tables holding records for an event ('all'/undefined = both) and type (undefined = both)
+function recordTablesFor(eventId?: string, type?: 'PASS' | 'DONATION'): string[] {
+  const events = eventId === 'garba_groove' || eventId === 'navratri_utsav' ? [eventId] : ['garba_groove', 'navratri_utsav'];
+  const types: ('PASS' | 'DONATION')[] = type ? [type] : ['PASS', 'DONATION'];
+  return events.flatMap((ev) => types.map((t) => getRecordTableName(ev, t)));
+}
+
+const SEARCH_COLUMNS = ['order_id', 'name', 'email', 'phone', 'payment_id', 'divisions', 'referred_volunteer'];
+
+// Characters with meaning in PostgREST filter syntax or LIKE patterns are dropped from user search input
+function sanitizeSearchTerm(search?: string): string {
+  return (search || '').replace(/[,()"'\\%*:]/g, ' ').replace(/\s+/g, ' ').trim();
+}
+
+type RecordSelectQuery = ReturnType<ReturnType<SupabaseClient['from']>['select']>;
+
+// Like fetchAllFromSupabase, but with filters applied in the database, and errors thrown rather than truncating
+async function fetchAllMatching(
+  client: SupabaseClient,
+  tableName: string,
+  applyFilters: (query: RecordSelectQuery) => RecordSelectQuery
+): Promise<EventRecord[]> {
+  const all: EventRecord[] = [];
+  const pageSize = 1000;
+  for (let page = 0; ; page++) {
+    const { data, error } = await applyFilters(client.from(tableName).select('*'))
+      .order('id', { ascending: true })
+      .range(page * pageSize, (page + 1) * pageSize - 1);
+    if (error) throw new Error(`${tableName}: ${error.message}`);
+    all.push(...((data || []) as EventRecord[]));
+    if (!data || data.length < pageSize) break;
+  }
+  return all;
 }
 
 // Helper to fetch ALL rows from a Supabase table handling PostgREST 1000-row pagination limit
@@ -468,11 +521,13 @@ export function computeHourlyStats(records: EventRecord[]): import('./types').Ho
   const hourMap = new Map<number, {
     passTransactions: number;
     totalPasses: number;
+    totalPassAmount: number;
     donationTransactions: number;
     totalDonationAmount: number;
     divisionMap: Map<string, {
       passTransactions: number;
       totalPasses: number;
+      totalPassAmount: number;
       donationTransactions: number;
       totalDonationAmount: number;
     }>;
@@ -482,6 +537,7 @@ export function computeHourlyStats(records: EventRecord[]): import('./types').Ho
     hourMap.set(h, {
       passTransactions: 0,
       totalPasses: 0,
+      totalPassAmount: 0,
       donationTransactions: 0,
       totalDonationAmount: 0,
       divisionMap: new Map(),
@@ -500,6 +556,7 @@ export function computeHourlyStats(records: EventRecord[]): import('./types').Ho
       hData.divisionMap.set(divName, {
         passTransactions: 0,
         totalPasses: 0,
+        totalPassAmount: 0,
         donationTransactions: 0,
         totalDonationAmount: 0,
       });
@@ -508,10 +565,13 @@ export function computeHourlyStats(records: EventRecord[]): import('./types').Ho
 
     if (r.record_type === 'PASS') {
       const qty = Number(r.item_quantity) || 1;
+      const amt = Number(r.total_payment_amount) || Number(r.item_payment_amount) || 0;
       hData.passTransactions++;
       hData.totalPasses += qty;
+      hData.totalPassAmount += amt;
       divEntry.passTransactions++;
       divEntry.totalPasses += qty;
+      divEntry.totalPassAmount += amt;
     } else if (r.record_type === 'DONATION') {
       const amt = Number(r.total_payment_amount) || Number(r.item_payment_amount) || 0;
       hData.donationTransactions++;
@@ -532,9 +592,10 @@ export function computeHourlyStats(records: EventRecord[]): import('./types').Ho
         division,
         passTransactions: divD.passTransactions,
         totalPasses: divD.totalPasses,
+        totalPassAmount: divD.totalPassAmount,
         donationTransactions: divD.donationTransactions,
         totalDonationAmount: divD.totalDonationAmount,
-        totalRevenue: divD.totalDonationAmount,
+        totalRevenue: divD.totalPassAmount + divD.totalDonationAmount,
         totalTransactions: divD.passTransactions + divD.donationTransactions,
       });
     }
@@ -548,9 +609,10 @@ export function computeHourlyStats(records: EventRecord[]): import('./types').Ho
       isoHour,
       passTransactions: dData.passTransactions,
       totalPasses: dData.totalPasses,
+      totalPassAmount: dData.totalPassAmount,
       donationTransactions: dData.donationTransactions,
       totalDonationAmount: dData.totalDonationAmount,
-      totalRevenue: dData.totalDonationAmount,
+      totalRevenue: dData.totalPassAmount + dData.totalDonationAmount,
       totalTransactions: dData.passTransactions + dData.donationTransactions,
       divisionStats,
     });
@@ -568,6 +630,7 @@ export function computeDayWiseStats(records: EventRecord[]): DayWiseStat[] {
       records: EventRecord[];
       passTransactions: number;
       totalPasses: number;
+      totalPassAmount: number;
       donationTransactions: number;
       totalDonationAmount: number;
       divisionMap: Map<
@@ -575,6 +638,7 @@ export function computeDayWiseStats(records: EventRecord[]): DayWiseStat[] {
         {
           passTransactions: number;
           totalPasses: number;
+          totalPassAmount: number;
           donationTransactions: number;
           totalDonationAmount: number;
         }
@@ -590,6 +654,7 @@ export function computeDayWiseStats(records: EventRecord[]): DayWiseStat[] {
         records: [],
         passTransactions: 0,
         totalPasses: 0,
+        totalPassAmount: 0,
         donationTransactions: 0,
         totalDonationAmount: 0,
         divisionMap: new Map(),
@@ -605,6 +670,7 @@ export function computeDayWiseStats(records: EventRecord[]): DayWiseStat[] {
       day.divisionMap.set(divName, {
         passTransactions: 0,
         totalPasses: 0,
+        totalPassAmount: 0,
         donationTransactions: 0,
         totalDonationAmount: 0,
       });
@@ -613,10 +679,13 @@ export function computeDayWiseStats(records: EventRecord[]): DayWiseStat[] {
 
     if (r.record_type === 'PASS') {
       const qty = Number(r.item_quantity) || 1;
+      const amt = Number(r.total_payment_amount) || Number(r.item_payment_amount) || 0;
       day.passTransactions++;
       day.totalPasses += qty;
+      day.totalPassAmount += amt;
       divEntry.passTransactions++;
       divEntry.totalPasses += qty;
+      divEntry.totalPassAmount += amt;
     } else if (r.record_type === 'DONATION') {
       const amt = Number(r.total_payment_amount) || Number(r.item_payment_amount) || 0;
       day.donationTransactions++;
@@ -634,9 +703,10 @@ export function computeDayWiseStats(records: EventRecord[]): DayWiseStat[] {
         division,
         passTransactions: dData.passTransactions,
         totalPasses: dData.totalPasses,
+        totalPassAmount: dData.totalPassAmount,
         donationTransactions: dData.donationTransactions,
         totalDonationAmount: dData.totalDonationAmount,
-        totalRevenue: dData.totalDonationAmount,
+        totalRevenue: dData.totalPassAmount + dData.totalDonationAmount,
         totalTransactions: dData.passTransactions + dData.donationTransactions,
       });
     }
@@ -650,9 +720,10 @@ export function computeDayWiseStats(records: EventRecord[]): DayWiseStat[] {
       displayDate: data.displayDate,
       passTransactions: data.passTransactions,
       totalPasses: data.totalPasses,
+      totalPassAmount: data.totalPassAmount,
       donationTransactions: data.donationTransactions,
       totalDonationAmount: data.totalDonationAmount,
-      totalRevenue: data.totalDonationAmount,
+      totalRevenue: data.totalPassAmount + data.totalDonationAmount,
       totalTransactions: data.passTransactions + data.donationTransactions,
       divisionStats,
       hourlyStats,
@@ -696,6 +767,7 @@ export function computeDivisionStats(records: EventRecord[]): DivisionStats[] {
     {
       passTransactions: number;
       totalPasses: number;
+      totalPassAmount: number;
       donationTransactions: number;
       totalDonationAmount: number;
       rawVolunteers: Map<
@@ -723,6 +795,7 @@ export function computeDivisionStats(records: EventRecord[]): DivisionStats[] {
       map.set(divName, {
         passTransactions: 0,
         totalPasses: 0,
+        totalPassAmount: 0,
         donationTransactions: 0,
         totalDonationAmount: 0,
         rawVolunteers: new Map(),
@@ -763,8 +836,10 @@ export function computeDivisionStats(records: EventRecord[]): DivisionStats[] {
 
     if (r.record_type === 'PASS') {
       const qty = Number(r.item_quantity) || 1;
+      const amt = Number(r.total_payment_amount) || Number(r.item_payment_amount) || 0;
       item.passTransactions++;
       item.totalPasses += qty;
+      item.totalPassAmount += amt;
       vol.passes += qty;
       vol.passTransactions++;
       dayItem.passes += qty;
@@ -897,9 +972,10 @@ export function computeDivisionStats(records: EventRecord[]): DivisionStats[] {
       division,
       passTransactions: data.passTransactions,
       totalPasses: data.totalPasses,
+      totalPassAmount: data.totalPassAmount,
       donationTransactions: data.donationTransactions,
       totalDonationAmount: data.totalDonationAmount,
-      totalRevenue: data.totalDonationAmount,
+      totalRevenue: data.totalPassAmount + data.totalDonationAmount,
       totalTransactions: data.passTransactions + data.donationTransactions,
       volunteersCount: consolidated.size,
       topVolunteers,
@@ -958,9 +1034,11 @@ export async function getDashboardStats(eventId?: string): Promise<DashboardStat
       const donations = records.filter((r) => r.record_type === 'DONATION');
 
       const totalCapturedPasses = passes.reduce((acc, curr) => acc + (Number(curr.item_quantity) || 1), 0);
+      const totalCapturedPassAmount = passes.reduce((acc, curr) => acc + (Number(curr.total_payment_amount) || Number(curr.item_payment_amount) || 0), 0);
       const passTransactions = passes.length;
       const capturedDonations = donations.length;
       const totalDonationAmount = donations.reduce((acc, curr) => acc + (Number(curr.total_payment_amount) || Number(curr.item_payment_amount) || 0), 0);
+      const totalRevenue = totalCapturedPassAmount + totalDonationAmount;
 
       const divisionStats = computeDivisionStats(records);
       const dayWiseStats = computeDayWiseStats(records);
@@ -968,9 +1046,11 @@ export async function getDashboardStats(eventId?: string): Promise<DashboardStat
 
       return {
         totalCapturedPasses,
+        totalCapturedPassAmount,
         passTransactions,
         capturedDonations,
         totalDonationAmount,
+        totalRevenue,
         totalCapturedRows: passTransactions + capturedDonations,
         totalImportedBatches: latestBatches?.length ? 1 : 0,
         latestImport: latestBatches && latestBatches.length > 0 ? latestBatches[0] : null,
@@ -996,9 +1076,11 @@ export async function getDashboardStats(eventId?: string): Promise<DashboardStat
   const donations = records.filter((r) => r.record_type === 'DONATION');
 
   const totalCapturedPasses = passes.reduce((acc, curr) => acc + (Number(curr.item_quantity) || 1), 0);
+  const totalCapturedPassAmount = passes.reduce((acc, curr) => acc + (Number(curr.total_payment_amount) || Number(curr.item_payment_amount) || 0), 0);
   const passTransactions = passes.length;
   const capturedDonations = donations.length;
   const totalDonationAmount = donations.reduce((acc, curr) => acc + (Number(curr.total_payment_amount) || Number(curr.item_payment_amount) || 0), 0);
+  const totalRevenue = totalCapturedPassAmount + totalDonationAmount;
 
   const divisionStats = computeDivisionStats(records);
   const dayWiseStats = computeDayWiseStats(records);
@@ -1006,9 +1088,11 @@ export async function getDashboardStats(eventId?: string): Promise<DashboardStat
 
   return {
     totalCapturedPasses,
+    totalCapturedPassAmount,
     passTransactions,
     capturedDonations,
     totalDonationAmount,
+    totalRevenue,
     totalCapturedRows: passTransactions + capturedDonations,
     totalImportedBatches: batches.length,
     latestImport: batches.length > 0 ? batches[0] : null,
@@ -1034,33 +1118,29 @@ export async function getRecords(params: {
   const client = getSupabaseClient();
   if (isUsingSupabase() && client) {
     try {
-      let records = await fetchSupabaseRecords(client, eventId);
+      // Event/type pick the tables; division and search run in the database. Date/hour stay in JS because
+      // payment_date is free-form text from the Razorpay export.
+      const searchTerm = sanitizeSearchTerm(search);
+      const perTable = await Promise.all(
+        recordTablesFor(eventId, type).map((table) =>
+          fetchAllMatching(client, table, (query) => {
+            let q = query;
+            if (division && division !== 'all') q = q.eq('divisions', division);
+            if (searchTerm) {
+              q = q.or(SEARCH_COLUMNS.map((col) => `${col}.ilike.%${searchTerm}%`).join(','));
+            }
+            return q;
+          })
+        )
+      );
+      let records = perTable.flat();
 
-      if (type) {
-        records = records.filter((r) => r.record_type === type);
-      }
-      if (division && division !== 'all') {
-        records = records.filter((r) => r.divisions === division);
-      }
       if (date && date !== 'all') {
         records = records.filter((r) => parseRecordDateTime(r.payment_date || r.created_at).isoDate === date);
       }
       if (hour !== undefined && hour !== null && hour !== 'all' && String(hour).trim() !== '') {
         const targetH = Number(hour);
         records = records.filter((r) => parseRecordDateTime(r.payment_date || r.created_at).hour === targetH);
-      }
-      if (search && search.trim()) {
-        const s = search.trim().toLowerCase();
-        records = records.filter(
-          (r) =>
-            r.order_id?.toLowerCase().includes(s) ||
-            r.name?.toLowerCase().includes(s) ||
-            r.email?.toLowerCase().includes(s) ||
-            r.phone?.toLowerCase().includes(s) ||
-            r.payment_id?.toLowerCase().includes(s) ||
-            r.divisions?.toLowerCase().includes(s) ||
-            r.referred_volunteer?.toLowerCase().includes(s)
-        );
       }
 
       records.sort((a, b) => new Date(b.created_at || 0).getTime() - new Date(a.created_at || 0).getTime());
@@ -1115,8 +1195,20 @@ export async function getRecordsByOrderIds(orderIds: string[]): Promise<EventRec
   const client = getSupabaseClient();
   if (isUsingSupabase() && client) {
     try {
-      const records = await fetchSupabaseRecords(client);
-      const matched = records.filter((r) => orderIds.includes(r.order_id));
+      // .in() per table in chunks (keeps the request URL short) instead of downloading every record
+      const unique = Array.from(new Set(orderIds));
+      const chunkSize = 150;
+      const matched: EventRecord[] = [];
+      for (let i = 0; i < unique.length; i += chunkSize) {
+        const chunk = unique.slice(i, i + chunkSize);
+        const results = await Promise.all(
+          ALL_RECORD_TABLES.map((table) => client.from(table).select('*').in('order_id', chunk))
+        );
+        for (const { data, error } of results) {
+          if (error) throw new Error(error.message);
+          matched.push(...((data || []) as EventRecord[]));
+        }
+      }
       if (matched.length > 0) return matched;
     } catch (err) {
       console.warn('Supabase getRecordsByOrderIds error, fallback local:', err);
@@ -1149,16 +1241,21 @@ export async function updateRecordEmailStatus(
 
   const client = getSupabaseClient();
   if (isUsingSupabase() && client) {
-    try {
-      await Promise.allSettled([
-        client.from('garba_groove_passes').update(updatePayload).eq('order_id', orderId),
-        client.from('garba_groove_donations').update(updatePayload).eq('order_id', orderId),
-        client.from('navratri_utsav_passes').update(updatePayload).eq('order_id', orderId),
-        client.from('navratri_utsav_donations').update(updatePayload).eq('order_id', orderId),
-      ]);
-    } catch (err) {
-      console.warn('Supabase updateRecordEmailStatus error:', err);
-    }
+    // Core columns exist in every schema version; tracking columns need supabase/add_email_tracking_columns.sql
+    const corePayload: Record<string, unknown> = { email_status: status };
+    if (status === 'Sent') corePayload.email_sent_at = updatePayload.email_sent_at;
+
+    await Promise.all(
+      ALL_RECORD_TABLES.map(async (table) => {
+        const { error } = await client.from(table).update(updatePayload).eq('order_id', orderId);
+        if (!error) return;
+        console.warn(`updateRecordEmailStatus on ${table} failed (${error.message}); retrying with core columns`);
+        const { error: coreErr } = await client.from(table).update(corePayload).eq('order_id', orderId);
+        if (coreErr) {
+          console.error(`updateRecordEmailStatus on ${table} failed: ${coreErr.message}`);
+        }
+      })
+    );
   }
 
   const local = readLocalDb();
@@ -1209,6 +1306,7 @@ export function getSettings(): SystemSettings {
   const envGoogleSpreadsheetId = process.env.GOOGLE_SPREADSHEET_ID;
   const envGarbaGrooveSpreadsheetId = process.env.GARBA_GROOVE_SPREADSHEET_ID;
   const envNavratriUtsavSpreadsheetId = process.env.NAVRATRI_UTSAV_SPREADSHEET_ID;
+  const envGarbaPassBgUrl = process.env.GARBA_PASS_BG_URL;
   const envNavratriPassBgUrl = process.env.NAVRATRI_PASS_BG_URL;
   const envGoogleServiceAccountEmail = process.env.GOOGLE_SERVICE_ACCOUNT_EMAIL;
   const envGooglePrivateKey = process.env.GOOGLE_PRIVATE_KEY;
@@ -1223,6 +1321,7 @@ export function getSettings(): SystemSettings {
     googleSpreadsheetId: envGoogleSpreadsheetId || local.settings?.googleSpreadsheetId,
     garbaGrooveSpreadsheetId: envGarbaGrooveSpreadsheetId || local.settings?.garbaGrooveSpreadsheetId,
     navratriUtsavSpreadsheetId: envNavratriUtsavSpreadsheetId || local.settings?.navratriUtsavSpreadsheetId,
+    garbaPassBgUrl: envGarbaPassBgUrl || local.settings?.garbaPassBgUrl,
     navratriPassBgUrl: envNavratriPassBgUrl || local.settings?.navratriPassBgUrl,
     googleServiceAccountEmail: envGoogleServiceAccountEmail || local.settings?.googleServiceAccountEmail,
     googlePrivateKey: envGooglePrivateKey || local.settings?.googlePrivateKey,
@@ -1237,6 +1336,21 @@ export function saveSettings(settings: Partial<SystemSettings>): SystemSettings 
   return local.settings;
 }
 
+// Exact-match lookup across the 4 tables: order_id first (always equals code on import), then code.
+// Uses .eq() rather than a hand-built .or() string so a crafted QR code can't alter the filter.
+async function findSupabaseRecordByCode(client: SupabaseClient, code: string): Promise<EventRecord | null> {
+  for (const column of ['order_id', 'code'] as const) {
+    const results = await Promise.all(
+      ALL_RECORD_TABLES.map((table) => client.from(table).select('*').eq(column, code).limit(1))
+    );
+    for (const { data, error } of results) {
+      if (error) throw new Error(error.message);
+      if (data && data.length > 0) return data[0] as EventRecord;
+    }
+  }
+  return null;
+}
+
 // Get single record by code or order_id
 export async function getRecordByCode(code: string): Promise<EventRecord | null> {
   if (!code || !code.trim()) return null;
@@ -1245,10 +1359,7 @@ export async function getRecordByCode(code: string): Promise<EventRecord | null>
   const client = getSupabaseClient();
   if (isUsingSupabase() && client) {
     try {
-      const records = await fetchSupabaseRecords(client);
-      const found = records.find(
-        (r) => r.order_id?.trim() === trimmed || r.code?.trim() === trimmed
-      );
+      const found = await findSupabaseRecordByCode(client, trimmed);
       if (found) return found;
     } catch (err) {
       console.warn('Supabase getRecordByCode error, fallback local:', err);
@@ -1277,10 +1388,7 @@ export async function updateAttendanceStatus(
   const client = getSupabaseClient();
   if (isUsingSupabase() && client) {
     try {
-      const records = await fetchSupabaseRecords(client);
-      const target = records.find(
-        (r) => r.order_id?.trim() === trimmed || r.code?.trim() === trimmed
-      );
+      const target = await findSupabaseRecordByCode(client, trimmed);
 
       if (target) {
         // Resolve exact table from event_id + record_type
@@ -1365,3 +1473,486 @@ export async function clearDatabase(): Promise<{ success: boolean; message: stri
       : 'Local database cleared successfully.',
   };
 }
+
+// ---------------------------------------------------------------------------
+// EMAIL BATCHES & ASYNC DISPATCH PERSISTENCE
+// ---------------------------------------------------------------------------
+
+export async function createEmailBatch(
+  batch: import('./types').EmailBatch,
+  jobs: import('./types').EmailDispatchLog[]
+): Promise<void> {
+  const client = getSupabaseClient();
+  if (isUsingSupabase() && client) {
+    // Jobs must be durable in Supabase, otherwise workers on other serverless instances never see them
+    const { error: batchErr } = await client.from('email_batches').upsert([batch], { onConflict: 'batch_id' });
+    if (batchErr) {
+      throw new Error(`Failed to create email batch in Supabase: ${batchErr.message}`);
+    }
+    // Chunk inserts for PostgREST
+    const chunkSize = 100;
+    for (let i = 0; i < jobs.length; i += chunkSize) {
+      const { error: jobsErr } = await client
+        .from('email_dispatch_logs')
+        .upsert(jobs.slice(i, i + chunkSize), { onConflict: 'id' });
+      if (jobsErr) {
+        throw new Error(`Failed to queue email jobs in Supabase: ${jobsErr.message}`);
+      }
+    }
+  }
+
+  const local = readLocalDb();
+  if (!local.email_batches) local.email_batches = [];
+  if (!local.email_dispatch_logs) local.email_dispatch_logs = [];
+
+  const bIdx = local.email_batches.findIndex((b) => b.batch_id === batch.batch_id);
+  if (bIdx !== -1) {
+    local.email_batches[bIdx] = batch;
+  } else {
+    local.email_batches.unshift(batch);
+  }
+
+  // Remove existing job records for same IDs and append new
+  const jobIds = new Set(jobs.map((j) => j.id));
+  local.email_dispatch_logs = local.email_dispatch_logs.filter((j) => !jobIds.has(j.id));
+  local.email_dispatch_logs.push(...jobs);
+
+  writeLocalDb(local);
+}
+
+export async function getEmailBatch(batchId: string): Promise<import('./types').EmailBatch | null> {
+  const client = getSupabaseClient();
+  if (isUsingSupabase() && client) {
+    try {
+      const { data, error } = await client.from('email_batches').select('*').eq('batch_id', batchId).single();
+      if (!error && data) return data as import('./types').EmailBatch;
+    } catch (err) {
+      console.warn('Supabase getEmailBatch fallback local:', err);
+    }
+  }
+
+  const local = readLocalDb();
+  const found = (local.email_batches || []).find((b) => b.batch_id === batchId);
+  return found || null;
+}
+
+/** Batches from the last 24h that still have work left, newest first (read-only, for progress display) */
+export async function getActiveEmailBatches(): Promise<import('./types').EmailBatch[]> {
+  const sinceIso = new Date(Date.now() - 24 * 60 * 60 * 1000).toISOString();
+  const isActive = (b: import('./types').EmailBatch) =>
+    !b.completed_at && b.queued + b.processing + b.retrying > 0 && b.created_at >= sinceIso;
+
+  const client = getSupabaseClient();
+  if (isUsingSupabase() && client) {
+    const { data, error } = await client
+      .from('email_batches')
+      .select('*')
+      .is('completed_at', null)
+      .gte('created_at', sinceIso)
+      .order('created_at', { ascending: false })
+      .limit(10);
+    if (error) throw new Error(`Failed to read active email batches: ${error.message}`);
+    return ((data || []) as import('./types').EmailBatch[]).filter(isActive);
+  }
+
+  return (readLocalDb().email_batches || []).filter(isActive);
+}
+
+export async function claimNextEmailJobs(
+  batchId?: string,
+  limit = 5
+): Promise<import('./types').EmailDispatchLog[]> {
+  const nowIso = new Date().toISOString();
+  const client = getSupabaseClient();
+
+  if (isUsingSupabase() && client) {
+    try {
+      let query = client
+        .from('email_dispatch_logs')
+        .select('*')
+        .in('status', ['QUEUED', 'RETRYING'])
+        .or(`next_retry_at.is.null,next_retry_at.lte.${nowIso}`)
+        .order('created_at', { ascending: true })
+        .limit(limit);
+
+      if (batchId) {
+        query = query.eq('batch_id', batchId);
+      }
+
+      const { data: eligible, error } = await query;
+      if (!error && eligible && eligible.length > 0) {
+        const claimed: import('./types').EmailDispatchLog[] = [];
+        for (const candidate of eligible) {
+          // Atomic conditional update
+          const { data: updated, error: updateErr } = await client
+            .from('email_dispatch_logs')
+            .update({
+              status: 'PROCESSING',
+              attempt_count: (candidate.attempt_count || 0) + 1,
+              updated_at: nowIso,
+            })
+            .eq('id', candidate.id)
+            .in('status', ['QUEUED', 'RETRYING'])
+            .select()
+            .single();
+
+          if (!updateErr && updated) {
+            claimed.push(updated as import('./types').EmailDispatchLog);
+          }
+        }
+        if (claimed.length > 0) return claimed;
+      }
+    } catch (err) {
+      console.warn('Supabase claimNextEmailJobs fallback local:', err);
+    }
+  }
+
+  // Local Store Atomic Mutex Claim
+  const local = readLocalDb();
+  if (!local.email_dispatch_logs) local.email_dispatch_logs = [];
+  const nowMs = Date.now();
+  const claimed: import('./types').EmailDispatchLog[] = [];
+
+  for (const job of local.email_dispatch_logs) {
+    if (claimed.length >= limit) break;
+    if (batchId && job.batch_id !== batchId) continue;
+
+    if (job.status === 'QUEUED' || job.status === 'RETRYING') {
+      const isRetryReady = !job.next_retry_at || new Date(job.next_retry_at).getTime() <= nowMs;
+      if (isRetryReady) {
+        job.status = 'PROCESSING';
+        job.attempt_count = (job.attempt_count || 0) + 1;
+        job.updated_at = nowIso;
+        claimed.push({ ...job });
+      }
+    }
+  }
+
+  if (claimed.length > 0) {
+    writeLocalDb(local);
+  }
+
+  return claimed;
+}
+
+export async function updateEmailDispatchJob(
+  jobId: string,
+  updates: Partial<import('./types').EmailDispatchLog>
+): Promise<void> {
+  const client = getSupabaseClient();
+  const payload = { ...updates, updated_at: new Date().toISOString() };
+
+  if (isUsingSupabase() && client) {
+    try {
+      const { error } = await client.from('email_dispatch_logs').update(payload).eq('id', jobId);
+      if (error && 'smtp_account' in payload && error.message.includes('smtp_account')) {
+        // smtp_account column not migrated yet: still persist the status so the job isn't stuck in PROCESSING
+        const { smtp_account: _omit, ...withoutAccount } = payload;
+        const { error: retryErr } = await client.from('email_dispatch_logs').update(withoutAccount).eq('id', jobId);
+        if (retryErr) console.error(`updateEmailDispatchJob ${jobId} failed: ${retryErr.message}`);
+      } else if (error) {
+        console.error(`updateEmailDispatchJob ${jobId} failed: ${error.message}`);
+      }
+    } catch (err) {
+      console.warn('Supabase updateEmailDispatchJob fallback local:', err);
+    }
+  }
+
+  const local = readLocalDb();
+  if (!local.email_dispatch_logs) local.email_dispatch_logs = [];
+  const idx = local.email_dispatch_logs.findIndex((j) => j.id === jobId);
+  if (idx !== -1) {
+    local.email_dispatch_logs[idx] = { ...local.email_dispatch_logs[idx], ...payload };
+    writeLocalDb(local);
+  }
+}
+
+export async function updateEmailBatchCounts(
+  batchId: string
+): Promise<import('./types').EmailBatch | null> {
+  const client = getSupabaseClient();
+  let jobs: import('./types').EmailDispatchLog[] = [];
+
+  if (isUsingSupabase() && client) {
+    try {
+      // Page through: PostgREST caps a response at 1000 rows, which undercounted large batches and
+      // marked them complete while jobs past the first 1000 were still queued
+      const pageSize = 1000;
+      const all: import('./types').EmailDispatchLog[] = [];
+      for (let page = 0; ; page++) {
+        const { data, error } = await client
+          .from('email_dispatch_logs')
+          .select('id, status')
+          .eq('batch_id', batchId)
+          .order('id', { ascending: true })
+          .range(page * pageSize, (page + 1) * pageSize - 1);
+        if (error) throw new Error(error.message);
+        all.push(...((data || []) as import('./types').EmailDispatchLog[]));
+        if (!data || data.length < pageSize) break;
+      }
+      jobs = all;
+    } catch (err) {
+      console.warn('Supabase updateEmailBatchCounts get jobs fallback local:', err);
+    }
+  }
+
+  if (jobs.length === 0) {
+    const local = readLocalDb();
+    jobs = (local.email_dispatch_logs || []).filter((j) => j.batch_id === batchId);
+  }
+
+  const total = jobs.length;
+  let queued = 0;
+  let processing = 0;
+  let sent = 0;
+  let retrying = 0;
+  let failed = 0;
+
+  for (const j of jobs) {
+    if (j.status === 'QUEUED') queued++;
+    else if (j.status === 'PROCESSING') processing++;
+    else if (j.status === 'SENT') sent++;
+    else if (j.status === 'RETRYING') retrying++;
+    else if (j.status === 'FAILED') failed++;
+  }
+
+  const isCompleted = total > 0 && queued === 0 && processing === 0 && retrying === 0;
+  const completedAt = isCompleted ? new Date().toISOString() : null;
+
+  const updates: Partial<import('./types').EmailBatch> = {
+    total,
+    queued,
+    processing,
+    sent,
+    retrying,
+    failed,
+    ...(isCompleted ? { completed_at: completedAt } : {}),
+  };
+
+  if (isUsingSupabase() && client) {
+    try {
+      const { data } = await client
+        .from('email_batches')
+        .update(updates)
+        .eq('batch_id', batchId)
+        .select()
+        .single();
+      if (data) return data as import('./types').EmailBatch;
+    } catch (err) {
+      console.warn('Supabase updateEmailBatchCounts update fallback local:', err);
+    }
+  }
+
+  const local = readLocalDb();
+  if (!local.email_batches) local.email_batches = [];
+  const idx = local.email_batches.findIndex((b) => b.batch_id === batchId);
+  if (idx !== -1) {
+    local.email_batches[idx] = { ...local.email_batches[idx], ...updates };
+    writeLocalDb(local);
+    return local.email_batches[idx];
+  }
+
+  return null;
+}
+
+export class SmtpAccountColumnMissingError extends Error {
+  constructor() {
+    super(
+      'Multiple sender accounts are configured but email_dispatch_logs.smtp_account does not exist. ' +
+        'Run supabase/add_email_tracking_columns.sql in the Supabase SQL editor.'
+    );
+  }
+}
+
+/**
+ * Count emails SENT per sender account since `sinceIso`.
+ * Logs written before multi-account rotation have no smtp_account; they were sent by the primary account.
+ */
+export async function getSmtpSentCounts(
+  accounts: string[],
+  primaryAccount: string,
+  sinceIso: string
+): Promise<Map<string, number>> {
+  const counts = new Map<string, number>(accounts.map((a) => [a, 0]));
+  const client = getSupabaseClient();
+
+  if (isUsingSupabase() && client) {
+    const results = await Promise.all(
+      accounts.map(async (account) => {
+        let query = client
+          .from('email_dispatch_logs')
+          .select('id', { count: 'exact' })
+          .eq('status', 'SENT')
+          .gte('sent_at', sinceIso);
+        query =
+          account === primaryAccount
+            ? query.or(`smtp_account.eq."${account}",smtp_account.is.null`)
+            : query.eq('smtp_account', account);
+        const { count, error } = await query.limit(1);
+        return { account, count: count ?? 0, error };
+      })
+    );
+
+    const columnMissing = results.some((r) => r.error?.message.includes('smtp_account'));
+    if (columnMissing) {
+      if (accounts.length > 1) throw new SmtpAccountColumnMissingError();
+      // Single account: every SENT log belongs to it
+      const { count } = await client
+        .from('email_dispatch_logs')
+        .select('id', { count: 'exact' })
+        .eq('status', 'SENT')
+        .gte('sent_at', sinceIso)
+        .limit(1);
+      counts.set(primaryAccount, count ?? 0);
+      return counts;
+    }
+
+    for (const r of results) {
+      if (r.error) throw new Error(`Failed to count sends for ${r.account}: ${r.error.message}`);
+      counts.set(r.account, r.count);
+    }
+    return counts;
+  }
+
+  const local = readLocalDb();
+  const sinceMs = new Date(sinceIso).getTime();
+  for (const job of local.email_dispatch_logs || []) {
+    if (job.status !== 'SENT' || !job.sent_at || new Date(job.sent_at).getTime() < sinceMs) continue;
+    const account = job.smtp_account || primaryAccount;
+    if (counts.has(account)) counts.set(account, (counts.get(account) || 0) + 1);
+  }
+  return counts;
+}
+
+/**
+ * Latest successful send per order_id from the dispatch log: which account sent it (null = sent before
+ * per-account tracking, i.e. by the primary account) and when.
+ */
+export async function getLatestSentLogs(
+  orderIds: string[]
+): Promise<Map<string, { smtp_account: string | null; sent_at: string | null }>> {
+  const latest = new Map<string, { smtp_account: string | null; sent_at: string | null }>();
+  const keep = (row: { order_id: string; smtp_account?: string | null; sent_at?: string | null }) => {
+    const prev = latest.get(row.order_id);
+    if (!prev || (row.sent_at || '') > (prev.sent_at || '')) {
+      latest.set(row.order_id, { smtp_account: row.smtp_account || null, sent_at: row.sent_at || null });
+    }
+  };
+  const unique = Array.from(new Set(orderIds));
+  if (unique.length === 0) return latest;
+
+  const client = getSupabaseClient();
+  if (isUsingSupabase() && client) {
+    const chunkSize = 150;
+    for (let i = 0; i < unique.length; i += chunkSize) {
+      const { data, error } = await client
+        .from('email_dispatch_logs')
+        .select('order_id, smtp_account, sent_at')
+        .eq('status', 'SENT')
+        .in('order_id', unique.slice(i, i + chunkSize));
+      if (error) throw new Error(`Failed to read email senders: ${error.message}`);
+      (data || []).forEach(keep);
+    }
+    return latest;
+  }
+
+  const wanted = new Set(unique);
+  for (const job of readLocalDb().email_dispatch_logs || []) {
+    if (job.status === 'SENT' && wanted.has(job.order_id)) keep(job);
+  }
+  return latest;
+}
+
+/** Jobs currently mid-send; they will consume sender quota but aren't SENT yet */
+export async function countProcessingEmailJobs(): Promise<number> {
+  const client = getSupabaseClient();
+  if (isUsingSupabase() && client) {
+    const { count, error } = await client
+      .from('email_dispatch_logs')
+      .select('id', { count: 'exact' })
+      .eq('status', 'PROCESSING')
+      .limit(1);
+    if (error) throw new Error(`Failed to count in-flight email jobs: ${error.message}`);
+    return count ?? 0;
+  }
+  return (readLocalDb().email_dispatch_logs || []).filter((j) => j.status === 'PROCESSING').length;
+}
+
+/**
+ * Park every not-yet-sent job in a batch as DEFERRED (all sender accounts are at their daily limit).
+ * The attendee records stay Pending, so "Send All Pending" picks them up once quota frees.
+ */
+export async function deferQueuedEmailJobs(batchId: string, reason: string): Promise<number> {
+  const nowIso = new Date().toISOString();
+  const payload = { status: 'DEFERRED', error_message: reason, next_retry_at: null, updated_at: nowIso };
+  const client = getSupabaseClient();
+
+  if (isUsingSupabase() && client) {
+    const { data, error } = await client
+      .from('email_dispatch_logs')
+      .update(payload)
+      .eq('batch_id', batchId)
+      .in('status', ['QUEUED', 'RETRYING'])
+      .select('id');
+    if (error) {
+      console.error(`deferQueuedEmailJobs ${batchId} failed: ${error.message}`);
+      return 0;
+    }
+    return data?.length ?? 0;
+  }
+
+  const local = readLocalDb();
+  let deferred = 0;
+  for (const job of local.email_dispatch_logs || []) {
+    if (job.batch_id === batchId && (job.status === 'QUEUED' || job.status === 'RETRYING')) {
+      Object.assign(job, payload);
+      deferred++;
+    }
+  }
+  if (deferred > 0) writeLocalDb(local);
+  return deferred;
+}
+
+export async function resetStaleProcessingJobs(staleMinutes = 2): Promise<number> {
+  const cutoffIso = new Date(Date.now() - staleMinutes * 60 * 1000).toISOString();
+  const client = getSupabaseClient();
+  let recovered = 0;
+
+  if (isUsingSupabase() && client) {
+    try {
+      const { data, error } = await client
+        .from('email_dispatch_logs')
+        .update({
+          status: 'RETRYING',
+          next_retry_at: new Date().toISOString(),
+          updated_at: new Date().toISOString(),
+          error_message: 'Worker execution timeout, auto-recovered for retry',
+        })
+        .eq('status', 'PROCESSING')
+        .lt('updated_at', cutoffIso)
+        .select('id');
+
+      if (!error && data) recovered += data.length;
+    } catch (err) {
+      console.warn('Supabase resetStaleProcessingJobs fallback local:', err);
+    }
+  }
+
+  const local = readLocalDb();
+  if (local.email_dispatch_logs) {
+    const cutoffMs = Date.now() - staleMinutes * 60 * 1000;
+    for (const job of local.email_dispatch_logs) {
+      if (job.status === 'PROCESSING' && new Date(job.updated_at || job.created_at).getTime() < cutoffMs) {
+        job.status = 'RETRYING';
+        job.next_retry_at = new Date().toISOString();
+        job.updated_at = new Date().toISOString();
+        job.error_message = 'Worker execution timeout, auto-recovered for retry';
+        recovered++;
+      }
+    }
+    if (recovered > 0) writeLocalDb(local);
+  }
+
+  return recovered;
+}
+

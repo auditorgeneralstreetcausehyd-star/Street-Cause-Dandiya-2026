@@ -5,7 +5,7 @@ import { checkRateLimit } from '@/lib/rateLimit';
 export async function POST(req: NextRequest) {
   try {
     // Rate limit login attempts: 10 attempts per minute per IP
-    const rateCheck = checkRateLimit(req, 'auth_login', { limit: 10, windowSeconds: 60 });
+    const rateCheck = await checkRateLimit(req, 'auth_login', { limit: 10, windowSeconds: 60 });
     if (!rateCheck.allowed && rateCheck.response) {
       return rateCheck.response;
     }

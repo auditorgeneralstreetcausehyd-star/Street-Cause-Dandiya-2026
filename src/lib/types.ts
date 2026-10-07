@@ -4,6 +4,41 @@ export type BatchStatus = 'PROCESSING' | 'VALIDATED' | 'SYNCING' | 'COMPLETED' |
 
 export type EmailStatus = 'Pending' | 'Sending' | 'Sent' | 'Failed';
 
+// DEFERRED = parked because every sender account hit its daily limit; the pass stays Pending for a later send
+export type EmailJobStatus = 'QUEUED' | 'PROCESSING' | 'SENT' | 'RETRYING' | 'FAILED' | 'DEFERRED';
+
+export interface EmailBatch {
+  batch_id: string;
+  event_id: string;
+  requested_by?: string;
+  total: number;
+  queued: number;
+  processing: number;
+  sent: number;
+  retrying: number;
+  failed: number;
+  created_at: string;
+  completed_at?: string | null;
+}
+
+export interface EmailDispatchLog {
+  id: string;
+  batch_id: string;
+  order_id: string;
+  event_id: string;
+  recipient_email: string;
+  status: EmailJobStatus;
+  attempt_count: number;
+  smtp_message_id?: string | null;
+  smtp_account?: string | null; // Gmail account that sent it, used for per-account daily quota
+  smtp_code?: number | string | null;
+  error_message?: string | null;
+  next_retry_at?: string | null;
+  created_at: string;
+  updated_at: string;
+  sent_at?: string | null;
+}
+
 export type EventId = 'garba_groove' | 'navratri_utsav' | 'all';
 
 export interface EventInfo {
@@ -20,6 +55,7 @@ export interface DayDivisionStat {
   division: string;
   passTransactions: number;
   totalPasses: number;
+  totalPassAmount?: number;
   donationTransactions: number;
   totalDonationAmount: number;
   totalRevenue: number;
@@ -33,6 +69,7 @@ export interface HourlyStat {
   isoHour: string;       // '14'
   passTransactions: number;
   totalPasses: number;
+  totalPassAmount?: number;
   donationTransactions: number;
   totalDonationAmount: number;
   totalRevenue: number;
@@ -45,6 +82,7 @@ export interface DayWiseStat {
   displayDate: string;  // e.g. '20 Sep 2026'
   passTransactions: number;
   totalPasses: number;
+  totalPassAmount?: number;
   donationTransactions: number;
   totalDonationAmount: number;
   totalRevenue: number;
@@ -68,6 +106,7 @@ export interface DivisionStats {
   division: string;
   passTransactions: number;
   totalPasses: number;
+  totalPassAmount?: number;
   donationTransactions: number;
   totalDonationAmount: number;
   totalRevenue: number;
@@ -129,6 +168,7 @@ export interface EventRecord {
   email_sent_at?: string | null;
   email_last_attempt_at?: string | null;
   email_error?: string | null;
+  email_sent_from?: string | null; // derived from email_dispatch_logs, not a stored column
   attendance_status?: 'PENDING' | 'PRESENT' | 'CANCELLED';
   checked_in_at?: string | null;
   created_at: string;
@@ -145,9 +185,11 @@ export interface ImportError {
 
 export interface DashboardStats {
   totalCapturedPasses: number; // SUM(item_quantity) for PASS
+  totalCapturedPassAmount?: number; // SUM(payment_amount) for PASS
   passTransactions: number;    // COUNT(PASS)
   capturedDonations: number;   // COUNT(DONATION)
   totalDonationAmount: number; // SUM(item_payment_amount) for DONATION
+  totalRevenue?: number;       // totalCapturedPassAmount + totalDonationAmount
   totalCapturedRows: number;
   totalImportedBatches: number;
   latestImport?: ImportBatch | null;
@@ -164,6 +206,7 @@ export interface SystemSettings {
   googleSpreadsheetId?: string;
   garbaGrooveSpreadsheetId?: string;
   navratriUtsavSpreadsheetId?: string;
+  garbaPassBgUrl?: string;
   navratriPassBgUrl?: string;
   googleServiceAccountEmail?: string;
   googlePrivateKey?: string;
@@ -192,7 +235,7 @@ export const EVENT_CONFIGS: Record<'garba_groove' | 'navratri_utsav', EventConfi
     tagline: 'Presented by Street Cause Hyderabad',
     date: '10 Oct 2026',
     venue: 'Telangana Gardens, New Bowenpally',
-    passBgUrl: 'https://res.cloudinary.com/dhrj3rpg8/image/upload/v1789971984/EVENT_PASS.png',
+    passBgUrl: 'https://res.cloudinary.com/ygf4cf8x/image/upload/v1791352492/Garba_Groove_Bg.png',
     keywords: ['garba', 'groove'],
   },
   navratri_utsav: {
@@ -202,7 +245,7 @@ export const EVENT_CONFIGS: Record<'garba_groove' | 'navratri_utsav', EventConfi
     tagline: 'Presented by Street Cause Hyderabad',
     date: '11 Oct 2026',
     venue: 'Telangana Gardens, New Bowenpally',
-    passBgUrl: 'https://res.cloudinary.com/dhrj3rpg8/image/upload/v1789971984/EVENT_PASS.png',
+    passBgUrl: 'https://res.cloudinary.com/ygf4cf8x/image/upload/v1791352481/Navratri_utsav_BG.png',
     keywords: ['navratri', 'utsav', 'nirvana'],
   },
 };

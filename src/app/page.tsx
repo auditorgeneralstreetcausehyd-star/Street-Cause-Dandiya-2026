@@ -50,9 +50,10 @@ import {
   ShieldCheck,
   ArrowUpDown,
   ArrowUp,
-  ArrowDown
+  ArrowDown,
+  IndianRupee
 } from 'lucide-react';
-import { DashboardStats, ImportBatch, EventRecord, PreImportAnalysis, EventId, DayWiseStat, HourlyStat, VolunteerStat, DivisionStats, SystemSettings } from '@/lib/types';
+import { DashboardStats, ImportBatch, EventRecord, PreImportAnalysis, EventId, DayWiseStat, HourlyStat, VolunteerStat, DivisionStats, SystemSettings, EmailBatch } from '@/lib/types';
 
 const ALL_HOURS_META = Array.from({ length: 24 }, (_, h) => {
   const startPeriod = h >= 12 ? 'PM' : 'AM';
@@ -145,7 +146,7 @@ export default function Home() {
   const [passDivisionFilter, setPassDivisionFilter] = useState<string>('all');
   const [donationSearch, setDonationSearch] = useState<string>('');
   const [divisionSearch, setDivisionSearch] = useState<string>('');
-  const [divisionSortBy, setDivisionSortBy] = useState<'passes' | 'donations' | 'total'>('passes');
+  const [divisionSortBy, setDivisionSortBy] = useState<'passes' | 'donations' | 'revenue' | 'total'>('passes');
   const [selectedDateFilter, setSelectedDateFilter] = useState<string>('all');
   const [selectedHourFilter, setSelectedHourFilter] = useState<string>('all');
   const [divisionViewMode, setDivisionViewMode] = useState<'cards' | 'l1_volunteers' | 'daywise_timeline'>('cards');
@@ -170,8 +171,31 @@ export default function Home() {
   const [passEmailFilter, setPassEmailFilter] = useState<'all' | 'pending' | 'sent' | 'failed'>('all');
   const [selectedPassIds, setSelectedPassIds] = useState<Set<string>>(new Set());
   const [emailSending, setEmailSending] = useState<boolean>(false);
-  const [emailResults, setEmailResults] = useState<Map<string, { status: string; error?: string }>>(new Map());
-  const [dispatchProgress, setDispatchProgress] = useState<{ current: number; total: number; sent: number; failed: number } | null>(null);
+  const [dispatchProgress, setDispatchProgress] = useState<{
+    current: number;
+    total: number;
+    sent: number;
+    retrying?: number;
+    failed: number;
+    deferred?: number;
+    batchId?: string | null;
+  } | null>(null);
+  const [activeBatches, setActiveBatches] = useState<EmailBatch[]>([]);
+  // Remaining sends across all rotated Gmail sender accounts (rolling 24h)
+  const [senderQuota, setSenderQuota] = useState<{
+    totalRemaining: number;
+    accounts: { user: string; dailyLimit: number; sent: number; remaining: number }[];
+  } | null>(null);
+
+  const fetchSenderQuota = useCallback(async () => {
+    try {
+      const res = await fetch('/api/email/quota');
+      const data = await res.json();
+      if (data.success) setSenderQuota({ totalRemaining: data.totalRemaining, accounts: data.accounts || [] });
+    } catch (err) {
+      console.warn('Failed to load sender quota:', err);
+    }
+  }, []);
 
   // Email Preview Modal State
   const [previewModalOpen, setPreviewModalOpen] = useState<boolean>(false);
@@ -294,75 +318,128 @@ export default function Home() {
     }
   };
 
-  // Batch Email Dispatcher with live chunking & progress updates
-  const handleSendEmails = async (orderIds: string[]) => {
+  // Asynchronous Batch Email Dispatcher with live status polling
+  // force = explicit resend, re-delivers passes that were already Sent
+  const handleSendEmails = async (orderIds: string[], force = false) => {
     if (orderIds.length === 0) return;
 
-    type EmailDispatchResult = { orderId: string; status: string; error?: string };
-
     setEmailSending(true);
-    const targetEvent = selectedEvent === 'navratri_utsav' ? 'navratri_utsav' : 'garba_groove';
-    setDispatchProgress({ current: 0, total: orderIds.length, sent: 0, failed: 0 });
+    // 'all' lets the API match passes from either event instead of only Garba Groove
+    const targetEvent = selectedEvent === 'navratri_utsav' || selectedEvent === 'garba_groove' ? selectedEvent : 'all';
+    setDispatchProgress({
+      current: 0,
+      total: orderIds.length,
+      sent: 0,
+      retrying: 0,
+      failed: 0,
+      batchId: null,
+    });
 
-    const chunkSize = 20;
-    let totalSent = 0;
-    let totalFailed = 0;
+    try {
+      // 1. Trigger asynchronous dispatch batch
+      const res = await fetch('/api/email', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ orderIds, eventId: targetEvent, force }),
+      });
 
-    for (let i = 0; i < orderIds.length; i += chunkSize) {
-      const chunk = orderIds.slice(i, i + chunkSize);
+      const data = await res.json();
 
-      try {
-        const res = await fetch('/api/email', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ orderIds: chunk, eventId: targetEvent }),
-        });
+      if (!data.success) {
+        void fetchSenderQuota();
+        alert(data.error || 'Failed to start email batch');
+        setEmailSending(false);
+        setDispatchProgress(null);
+        return;
+      }
 
-        const data = await res.json();
-
-        if (data.success && data.results) {
-          (data.results as EmailDispatchResult[]).forEach((r) => {
-            if (r.status === 'Sent') {
-              totalSent++;
-            } else {
-              totalFailed++;
-            }
-          });
-
-          setEmailResults((prev) => {
-            const next = new Map(prev);
-            (data.results as EmailDispatchResult[]).forEach((r) => {
-              next.set(r.orderId, { status: r.status, error: r.error });
-            });
-            return next;
-          });
-
-          // Deselect successfully sent items
-          setSelectedPassIds((prev) => {
-            const next = new Set(prev);
-            (data.results as EmailDispatchResult[]).forEach((r) => {
-              if (r.status === 'Sent') next.delete(r.orderId);
-            });
-            return next;
-          });
-        } else {
-          totalFailed += chunk.length;
-        }
-      } catch {
-        totalFailed += chunk.length;
+      const batchId = data.batchId;
+      if (!batchId) {
+        // All were already sent (idempotent skip)
+        alert(data.message || 'All selected passes have already been successfully sent.');
+        setEmailSending(false);
+        setDispatchProgress(null);
+        return;
       }
 
       setDispatchProgress({
-        current: Math.min(i + chunkSize, orderIds.length),
-        total: orderIds.length,
-        sent: totalSent,
-        failed: totalFailed,
+        current: 0,
+        total: data.queued || orderIds.length,
+        sent: 0,
+        retrying: 0,
+        failed: 0,
+        batchId,
       });
-    }
 
-    // Refresh passes after dispatch to sync state from database
-    await fetchPasses(passSearch, passDivisionFilter, selectedEvent, selectedDateFilter, selectedHourFilter);
-    setEmailSending(false);
+      // 2. Poll status every 1.5 seconds until completion. Each poll also drives the worker, so large
+      // batches keep going as long as they make progress; only give up after ~3 minutes with no progress.
+      const pollInterval = 1500;
+      const maxStalledPolls = 120;
+      let isCompleted = false;
+      let stalledPolls = 0;
+      let lastFinished = -1;
+      let deferredCount = 0;
+
+      while (!isCompleted && stalledPolls < maxStalledPolls) {
+        await new Promise((resolve) => setTimeout(resolve, pollInterval));
+
+        try {
+          const statusRes = await fetch(`/api/email/status?batchId=${encodeURIComponent(batchId)}`);
+          const statusData = await statusRes.json();
+
+          if (statusData.success) {
+            deferredCount = statusData.deferred || 0;
+            const finishedCount = (statusData.sent || 0) + (statusData.failed || 0) + deferredCount;
+            stalledPolls = finishedCount > lastFinished ? 0 : stalledPolls + 1;
+            lastFinished = finishedCount;
+            setDispatchProgress({
+              current: finishedCount,
+              total: statusData.total || orderIds.length,
+              sent: statusData.sent || 0,
+              retrying: statusData.retrying || 0,
+              failed: statusData.failed || 0,
+              deferred: deferredCount,
+              batchId,
+            });
+
+            if (statusData.completed) {
+              isCompleted = true;
+              break;
+            }
+          } else {
+            stalledPolls++;
+          }
+        } catch (pollErr) {
+          stalledPolls++;
+          console.warn('Status poll attempt failed:', pollErr);
+        }
+      }
+
+      if (deferredCount > 0) {
+        alert(
+          `${deferredCount} pass(es) were not sent because every sender account reached its daily limit. ` +
+            `They are still Pending. Use "Send All Pending" again once the limit frees up (rolling 24 hours).`
+        );
+      } else if (!isCompleted) {
+        alert('Email dispatch stopped making progress. Remaining passes stay Pending/Failed; you can send them again.');
+      }
+      void fetchSenderQuota();
+
+      // 3. Deselect processed items
+      setSelectedPassIds((prev) => {
+        const next = new Set(prev);
+        orderIds.forEach((id) => next.delete(id));
+        return next;
+      });
+
+      // 4. Refresh passes list to sync database statuses
+      await fetchPasses(passSearch, passDivisionFilter, selectedEvent, selectedDateFilter, selectedHourFilter);
+    } catch (err) {
+      console.error('Email dispatch error:', err);
+      alert(`Error starting email dispatch: ${err instanceof Error ? err.message : String(err)}`);
+    } finally {
+      setEmailSending(false);
+    }
   };
 
   // System Backend Info State
@@ -372,7 +449,8 @@ export default function Home() {
     googleSpreadsheetId: '',
     garbaGrooveSpreadsheetId: '',
     navratriUtsavSpreadsheetId: '',
-    navratriPassBgUrl: 'https://res.cloudinary.com/dhrj3rpg8/image/upload/v1789971984/EVENT_PASS.png',
+    garbaPassBgUrl: 'https://res.cloudinary.com/ygf4cf8x/image/upload/v1791352492/Garba_Groove_Bg.png',
+    navratriPassBgUrl: 'https://res.cloudinary.com/ygf4cf8x/image/upload/v1791352481/Navratri_utsav_BG.png',
     acceptedPaymentStatuses: ['captured', 'paid', 'success', 'successful', 'completed'],
     passKeywords: ['pass', 'ticket', 'entry', 'single', 'couple', 'vip', 'garba', 'dandiya'],
     donationKeywords: ['donation', 'donate', 'daan', 'seva', 'contribut', 'sponsorship', 'support'],
@@ -571,6 +649,42 @@ export default function Home() {
     }
   }, [isAuthenticated, selectedEvent, refreshAll]);
 
+  useEffect(() => {
+    if (isAuthenticated && activeTab === 'passes') {
+      void fetchSenderQuota();
+    }
+  }, [isAuthenticated, activeTab, fetchSenderQuota]);
+
+  // Show progress of any batch still sending, wherever it was started; refresh the list when one finishes
+  useEffect(() => {
+    if (!isAuthenticated || activeTab !== 'passes') return;
+    let cancelled = false;
+    let previousIds = new Set<string>();
+    const load = async () => {
+      try {
+        const res = await fetch('/api/email/active');
+        const data = await res.json();
+        if (cancelled || !data.success) return;
+        const batches: EmailBatch[] = data.batches || [];
+        setActiveBatches(batches);
+        const currentIds = new Set(batches.map((b) => b.batch_id));
+        if ([...previousIds].some((id) => !currentIds.has(id))) {
+          void fetchPasses(passSearch, passDivisionFilter, selectedEvent, selectedDateFilter, selectedHourFilter);
+          void fetchSenderQuota();
+        }
+        previousIds = currentIds;
+      } catch (err) {
+        console.warn('Failed to load active email batches:', err);
+      }
+    };
+    void load();
+    const timer = setInterval(load, 5000);
+    return () => {
+      cancelled = true;
+      clearInterval(timer);
+    };
+  }, [isAuthenticated, activeTab, fetchSenderQuota, fetchPasses, passSearch, passDivisionFilter, selectedEvent, selectedDateFilter, selectedHourFilter]);
+
   // When date or hour filter changes, re-query passes and donations
   useEffect(() => {
     if (isAuthenticated && selectedEvent) {
@@ -672,6 +786,7 @@ export default function Home() {
           division: d.division,
           passTransactions: d.passTransactions,
           totalPasses: d.totalPasses,
+          totalPassAmount: d.totalPassAmount || 0,
           donationTransactions: d.donationTransactions,
           totalDonationAmount: d.totalDonationAmount,
           totalRevenue: d.totalRevenue,
@@ -689,6 +804,7 @@ export default function Home() {
           division: d.division,
           passTransactions: d.passTransactions,
           totalPasses: d.totalPasses,
+          totalPassAmount: d.totalPassAmount || 0,
           donationTransactions: d.donationTransactions,
           totalDonationAmount: d.totalDonationAmount,
           totalRevenue: d.totalRevenue,
@@ -706,6 +822,7 @@ export default function Home() {
     .sort((a, b) => {
       if (divisionSortBy === 'passes') return b.totalPasses - a.totalPasses;
       if (divisionSortBy === 'donations') return b.totalDonationAmount - a.totalDonationAmount;
+      if (divisionSortBy === 'revenue') return (b.totalRevenue || 0) - (a.totalRevenue || 0);
       return b.totalTransactions - a.totalTransactions;
     });
 
@@ -1822,6 +1939,14 @@ export default function Home() {
                   >
                     Donations
                   </button>
+                  <button
+                    onClick={() => setDivisionSortBy('revenue')}
+                    className={`px-2 py-0.5 rounded-md font-semibold transition ${
+                      divisionSortBy === 'revenue' ? 'bg-emerald-500 text-slate-950 font-bold' : 'text-slate-400'
+                    }`}
+                  >
+                    Revenue
+                  </button>
                 </div>
               </div>
             </div>
@@ -1886,6 +2011,16 @@ export default function Home() {
                         </div>
                       </div>
 
+                      {/* Total Revenue Highlight Card */}
+                      <div className="bg-emerald-500/10 border border-emerald-500/30 rounded-xl p-3 mb-3 flex items-center justify-between">
+                        <div className="flex items-center gap-1.5 text-xs text-emerald-300 font-semibold">
+                          <IndianRupee className="w-4 h-4 text-emerald-400" /> Total Division Revenue
+                        </div>
+                        <div className="text-lg font-black text-emerald-400 tracking-tight">
+                          ₹{(div.totalRevenue ?? ((div.totalPassAmount || 0) + div.totalDonationAmount)).toLocaleString()}
+                        </div>
+                      </div>
+
                       {/* Stats Grid */}
                       <div className="grid grid-cols-2 gap-2.5 mb-4">
                         <div className="bg-slate-950/70 border border-slate-800/80 rounded-xl p-3">
@@ -1893,7 +2028,9 @@ export default function Home() {
                           <div className="text-xl font-extrabold text-amber-400 mt-0.5">
                             {div.totalPasses.toLocaleString()}
                           </div>
-                          <div className="text-[10px] text-slate-500">{div.passTransactions} txns</div>
+                          <div className="text-[10px] text-slate-500">
+                            {div.passTransactions} txns {div.totalPassAmount ? `• ₹${div.totalPassAmount.toLocaleString()}` : ''}
+                          </div>
                         </div>
 
                         <div className="bg-slate-950/70 border border-slate-800/80 rounded-xl p-3">
@@ -2781,13 +2918,29 @@ export default function Home() {
 
                     {selectedPassIds.size > 0 && (
                       <button
-                        onClick={() => handleSendEmails(Array.from(selectedPassIds))}
+                        onClick={() => handleSendEmails(Array.from(selectedPassIds), true)}
                         disabled={emailSending}
                         className="px-3.5 py-2 rounded-xl text-xs font-bold bg-amber-500/20 hover:bg-amber-500/30 text-amber-300 border border-amber-500/30 flex items-center gap-1.5 transition disabled:opacity-40"
                       >
                         <Mail className="w-3.5 h-3.5" />
                         ✉️ Resend Selected ({selectedPassIds.size})
                       </button>
+                    )}
+
+                    {senderQuota && (
+                      <span
+                        className={`text-[11px] px-2.5 py-1 rounded-lg border ${
+                          senderQuota.totalRemaining === 0
+                            ? 'border-rose-500/30 text-rose-300 bg-rose-500/10'
+                            : 'border-slate-700 text-slate-300 bg-slate-900'
+                        }`}
+                        title={senderQuota.accounts
+                          .map((a) => `${a.user}: ${a.sent}/${a.dailyLimit} sent in last 24h`)
+                          .join('\n')}
+                      >
+                        📮 {senderQuota.totalRemaining} sends left today ({senderQuota.accounts.length} account
+                        {senderQuota.accounts.length === 1 ? '' : 's'})
+                      </span>
                     )}
                   </div>
 
@@ -2835,6 +2988,101 @@ export default function Home() {
                     </button>
                   </div>
                 </div>
+
+                {/* Batches sending in the background (started from another tab or a script) */}
+                {activeBatches
+                  .filter((b) => b.batch_id !== dispatchProgress?.batchId)
+                  .map((b) => {
+                    const done = b.sent + b.failed;
+                    const pct = Math.min(100, Math.round((done / Math.max(1, b.total)) * 100));
+                    // ETA from the batch's average rate since it started (steadier than the last few polls)
+                    const elapsedMs = Date.now() - new Date(b.created_at).getTime();
+                    const remaining = Math.max(0, b.total - done);
+                    const etaMs = done > 0 && elapsedMs > 0 ? (remaining * elapsedMs) / done : null;
+                    const perMinute = done > 0 && elapsedMs > 0 ? Math.round(done / (elapsedMs / 60000)) : null;
+                    const etaLabel =
+                      etaMs === null
+                        ? 'Estimating time…'
+                        : `~${etaMs < 60000 ? '<1 min' : `${Math.round(etaMs / 60000)} min`} left · done by ${new Date(
+                            Date.now() + etaMs
+                          ).toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' })}${perMinute ? ` (${perMinute}/min)` : ''}`;
+                    return (
+                      <div key={b.batch_id} className="mt-4 p-4 rounded-xl bg-slate-950 border border-sky-500/30">
+                        <div className="flex flex-wrap items-center justify-between gap-2 text-xs font-semibold">
+                          <div className="flex items-center gap-2 text-sky-300">
+                            <RefreshCw className="w-3.5 h-3.5 animate-spin text-sky-400" />
+                            <span>
+                              Sending {b.event_id === 'navratri_utsav' ? 'Navratri Utsav' : 'Garba Groove'} passes (
+                              {b.batch_id})
+                            </span>
+                          </div>
+                          <div className="flex items-center gap-3 text-slate-300">
+                            <span className="text-emerald-400">✅ {b.sent} Sent</span>
+                            {b.retrying > 0 && <span className="text-amber-400">⏳ {b.retrying} Retrying</span>}
+                            {b.failed > 0 && <span className="text-rose-400">❌ {b.failed} Failed</span>}
+                            <span className="text-slate-400">
+                              {done} / {b.total} processed ({pct}%)
+                            </span>
+                            <span className="text-sky-300">⏱ {etaLabel}</span>
+                          </div>
+                        </div>
+                        <div className="w-full bg-slate-900 rounded-full h-2 mt-2.5 overflow-hidden border border-slate-800">
+                          <div
+                            className="bg-gradient-to-r from-sky-500 to-emerald-500 h-2 rounded-full transition-all duration-500"
+                            style={{ width: `${pct}%` }}
+                          />
+                        </div>
+                      </div>
+                    );
+                  })}
+
+                {/* Live Async Batch Progress Telemetry */}
+                {dispatchProgress && (
+                  <div className="mt-4 p-4 rounded-xl bg-slate-950 border border-amber-500/30 animate-in fade-in duration-300">
+                    <div className="flex flex-wrap items-center justify-between gap-2 text-xs font-semibold">
+                      <div className="flex items-center gap-2 text-amber-300">
+                        {emailSending ? (
+                          <RefreshCw className="w-3.5 h-3.5 animate-spin text-amber-400" />
+                        ) : (
+                          <CheckCircle2 className="w-3.5 h-3.5 text-emerald-400" />
+                        )}
+                        <span>
+                          {emailSending
+                            ? `Dispatching Batch (${dispatchProgress.batchId || 'Initializing...'})`
+                            : `Batch Completed (${dispatchProgress.batchId})`}
+                        </span>
+                      </div>
+                      <div className="flex items-center gap-3 text-slate-300">
+                        <span className="text-emerald-400">✅ {dispatchProgress.sent} Sent</span>
+                        {(dispatchProgress.retrying ?? 0) > 0 && (
+                          <span className="text-amber-400">⏳ {dispatchProgress.retrying} Retrying</span>
+                        )}
+                        {(dispatchProgress.failed ?? 0) > 0 && (
+                          <span className="text-rose-400">❌ {dispatchProgress.failed} Failed</span>
+                        )}
+                        {(dispatchProgress.deferred ?? 0) > 0 && (
+                          <span className="text-slate-300">⏸ {dispatchProgress.deferred} Deferred (daily limit)</span>
+                        )}
+                        <span className="text-slate-400">
+                          {dispatchProgress.current} / {dispatchProgress.total} processed (
+                          {Math.round((dispatchProgress.current / Math.max(1, dispatchProgress.total)) * 100)}%)
+                        </span>
+                      </div>
+                    </div>
+                    {/* Progress Bar */}
+                    <div className="w-full bg-slate-900 rounded-full h-2 mt-2.5 overflow-hidden border border-slate-800">
+                      <div
+                        className="bg-gradient-to-r from-amber-500 via-orange-500 to-emerald-500 h-2 rounded-full transition-all duration-300"
+                        style={{
+                          width: `${Math.min(
+                            100,
+                            Math.round((dispatchProgress.current / Math.max(1, dispatchProgress.total)) * 100)
+                          )}%`,
+                        }}
+                      />
+                    </div>
+                  </div>
+                )}
               </div>
 
               {/* Table Toolbar (Search, Division, Date, Hour) */}
@@ -2964,8 +3212,7 @@ export default function Home() {
                     </thead>
                     <tbody className="divide-y divide-slate-800/60 text-slate-300">
                       {filteredPasses.map((rec) => {
-                        const result = emailResults.get(rec.order_id);
-                        const status = result?.status || rec.email_status || 'Pending';
+                        const status = rec.email_status || 'Pending';
                         const isSelected = selectedPassIds.has(rec.order_id);
 
                         return (
@@ -2997,16 +3244,23 @@ export default function Home() {
                             </td>
                             <td className="py-3 px-4">
                               {status === 'Sent' ? (
-                                <span
-                                  className="inline-flex items-center gap-1.5 px-2 py-0.5 rounded-full text-[11px] font-semibold bg-emerald-500/15 text-emerald-400 border border-emerald-500/30"
-                                  title={rec.email_sent_at ? `Sent at: ${new Date(rec.email_sent_at).toLocaleString()}` : 'Pass Delivered'}
-                                >
-                                  <CheckCircle2 className="w-3 h-3 text-emerald-400" /> Sent
-                                </span>
+                                <div className="flex flex-col items-start gap-1">
+                                  <span
+                                    className="inline-flex items-center gap-1.5 px-2 py-0.5 rounded-full text-[11px] font-semibold bg-emerald-500/15 text-emerald-400 border border-emerald-500/30"
+                                    title={rec.email_sent_at ? `Sent at: ${new Date(rec.email_sent_at).toLocaleString()}` : 'Pass Delivered'}
+                                  >
+                                    <CheckCircle2 className="w-3 h-3 text-emerald-400" /> Sent
+                                  </span>
+                                  {rec.email_sent_from && (
+                                    <span className="text-[10px] text-slate-500 font-mono" title={`Sent from ${rec.email_sent_from}`}>
+                                      via {rec.email_sent_from}
+                                    </span>
+                                  )}
+                                </div>
                               ) : status === 'Failed' ? (
                                 <span
                                   className="inline-flex items-center gap-1.5 px-2 py-0.5 rounded-full text-[11px] font-semibold bg-rose-500/15 text-rose-400 border border-rose-500/30"
-                                  title={rec.email_error || result?.error || 'Failed to dispatch email'}
+                                  title={rec.email_error || 'Failed to dispatch email'}
                                 >
                                   <AlertCircle className="w-3 h-3 text-rose-400" /> Failed
                                 </span>
@@ -3026,7 +3280,7 @@ export default function Home() {
                                   <Eye className="w-3.5 h-3.5" />
                                 </button>
                                 <button
-                                  onClick={() => handleSendEmails([rec.order_id])}
+                                  onClick={() => handleSendEmails([rec.order_id], status === 'Sent')}
                                   disabled={emailSending}
                                   className="p-1.5 rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-300 border border-slate-700 hover:text-emerald-300 transition disabled:opacity-50"
                                   title={status === 'Sent' ? 'Resend Pass Email' : 'Send Pass Email'}
@@ -3385,13 +3639,27 @@ export default function Home() {
 
               <div className="space-y-2">
                 <label className="text-xs font-bold text-slate-300">
+                  Garba Groove 2026 Pass Background Image URL
+                </label>
+                <input
+                  type="text"
+                  value={systemSettings.garbaPassBgUrl || ''}
+                  onChange={(e) => setSystemSettings({ ...systemSettings, garbaPassBgUrl: e.target.value })}
+                  placeholder="https://res.cloudinary.com/ygf4cf8x/image/upload/..."
+                  className="w-full bg-slate-950 border border-slate-800 rounded-xl px-3.5 py-2.5 text-xs text-slate-200 focus:outline-none focus:border-amber-500 font-mono"
+                />
+                <p className="text-[11px] text-slate-500">Cloudinary image URL for Garba Groove 2026 passes (Event Date: 10 Oct 2026).</p>
+              </div>
+
+              <div className="space-y-2">
+                <label className="text-xs font-bold text-slate-300">
                   Navratri Utsav 2026 Pass Background Image URL
                 </label>
                 <input
                   type="text"
                   value={systemSettings.navratriPassBgUrl || ''}
                   onChange={(e) => setSystemSettings({ ...systemSettings, navratriPassBgUrl: e.target.value })}
-                  placeholder="https://res.cloudinary.com/dhrj3rpg8/image/upload/..."
+                  placeholder="https://res.cloudinary.com/ygf4cf8x/image/upload/..."
                   className="w-full bg-slate-950 border border-slate-800 rounded-xl px-3.5 py-2.5 text-xs text-slate-200 focus:outline-none focus:border-amber-500 font-mono"
                 />
                 <p className="text-[11px] text-slate-500">Cloudinary image URL for Navratri Utsav 2026 passes (Event Date: 11 Oct 2026).</p>

@@ -52,6 +52,8 @@ CREATE TABLE IF NOT EXISTS garba_groove_passes (
     import_batch_id TEXT REFERENCES import_batches(id) ON DELETE SET NULL,
     email_status TEXT NOT NULL DEFAULT 'Pending',
     email_sent_at TIMESTAMPTZ,
+    email_last_attempt_at TIMESTAMPTZ,
+    email_error TEXT,
     attendance_status TEXT DEFAULT 'PENDING',
     checked_in_at TIMESTAMPTZ,
     created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
@@ -87,6 +89,8 @@ CREATE TABLE IF NOT EXISTS garba_groove_donations (
     import_batch_id TEXT REFERENCES import_batches(id) ON DELETE SET NULL,
     email_status TEXT NOT NULL DEFAULT 'Pending',
     email_sent_at TIMESTAMPTZ,
+    email_last_attempt_at TIMESTAMPTZ,
+    email_error TEXT,
     attendance_status TEXT DEFAULT 'PENDING',
     checked_in_at TIMESTAMPTZ,
     created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
@@ -122,6 +126,8 @@ CREATE TABLE IF NOT EXISTS navratri_utsav_passes (
     import_batch_id TEXT REFERENCES import_batches(id) ON DELETE SET NULL,
     email_status TEXT NOT NULL DEFAULT 'Pending',
     email_sent_at TIMESTAMPTZ,
+    email_last_attempt_at TIMESTAMPTZ,
+    email_error TEXT,
     attendance_status TEXT DEFAULT 'PENDING',
     checked_in_at TIMESTAMPTZ,
     created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
@@ -157,6 +163,8 @@ CREATE TABLE IF NOT EXISTS navratri_utsav_donations (
     import_batch_id TEXT REFERENCES import_batches(id) ON DELETE SET NULL,
     email_status TEXT NOT NULL DEFAULT 'Pending',
     email_sent_at TIMESTAMPTZ,
+    email_last_attempt_at TIMESTAMPTZ,
+    email_error TEXT,
     attendance_status TEXT DEFAULT 'PENDING',
     checked_in_at TIMESTAMPTZ,
     created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
@@ -204,12 +212,6 @@ ALTER TABLE navratri_utsav_passes ENABLE ROW LEVEL SECURITY;
 ALTER TABLE navratri_utsav_donations ENABLE ROW LEVEL SECURITY;
 ALTER TABLE import_errors ENABLE ROW LEVEL SECURITY;
 ALTER TABLE system_settings ENABLE ROW LEVEL SECURITY;
+-- No policies: anon/authenticated are denied; the server uses the service role key, which bypasses RLS
 
 -- Full access policies for service role
-CREATE POLICY "Allow full access on import_batches" ON import_batches FOR ALL USING (true);
-CREATE POLICY "Allow full access on garba_groove_passes" ON garba_groove_passes FOR ALL USING (true);
-CREATE POLICY "Allow full access on garba_groove_donations" ON garba_groove_donations FOR ALL USING (true);
-CREATE POLICY "Allow full access on navratri_utsav_passes" ON navratri_utsav_passes FOR ALL USING (true);
-CREATE POLICY "Allow full access on navratri_utsav_donations" ON navratri_utsav_donations FOR ALL USING (true);
-CREATE POLICY "Allow full access on import_errors" ON import_errors FOR ALL USING (true);
-CREATE POLICY "Allow full access on system_settings" ON system_settings FOR ALL USING (true);
