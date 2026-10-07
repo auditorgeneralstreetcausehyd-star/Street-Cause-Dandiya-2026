@@ -427,6 +427,17 @@ export async function insertEventRecords(records: EventRecord[]): Promise<{ inse
   return { inserted: uniqueToInsert.length, skipped: toInsert.length - uniqueToInsert.length, errors: [] };
 }
 
+// Amount a single record contributes to revenue. Uses the item's own payment amount: total_payment_amount is
+// the whole Razorpay order, so an order with a pass and a donation would otherwise be counted in full twice.
+// Dashboard figures count only payments Razorpay marked captured
+export function isCapturedRecord(r: Pick<EventRecord, 'payment_status'>): boolean {
+  return (r.payment_status || '').trim().toLowerCase() === 'captured';
+}
+
+export function recordAmount(r: Pick<EventRecord, 'item_payment_amount' | 'total_payment_amount'>): number {
+  return Number(r.item_payment_amount) || Number(r.total_payment_amount) || 0;
+}
+
 const MONTH_NAMES = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
 
 export function formatHourRange(hour: number): { hourLabel: string; hourDisplay: string; isoHour: string } {
@@ -565,7 +576,7 @@ export function computeHourlyStats(records: EventRecord[]): import('./types').Ho
 
     if (r.record_type === 'PASS') {
       const qty = Number(r.item_quantity) || 1;
-      const amt = Number(r.total_payment_amount) || Number(r.item_payment_amount) || 0;
+      const amt = recordAmount(r);
       hData.passTransactions++;
       hData.totalPasses += qty;
       hData.totalPassAmount += amt;
@@ -573,7 +584,7 @@ export function computeHourlyStats(records: EventRecord[]): import('./types').Ho
       divEntry.totalPasses += qty;
       divEntry.totalPassAmount += amt;
     } else if (r.record_type === 'DONATION') {
-      const amt = Number(r.total_payment_amount) || Number(r.item_payment_amount) || 0;
+      const amt = recordAmount(r);
       hData.donationTransactions++;
       hData.totalDonationAmount += amt;
       divEntry.donationTransactions++;
@@ -679,7 +690,7 @@ export function computeDayWiseStats(records: EventRecord[]): DayWiseStat[] {
 
     if (r.record_type === 'PASS') {
       const qty = Number(r.item_quantity) || 1;
-      const amt = Number(r.total_payment_amount) || Number(r.item_payment_amount) || 0;
+      const amt = recordAmount(r);
       day.passTransactions++;
       day.totalPasses += qty;
       day.totalPassAmount += amt;
@@ -687,7 +698,7 @@ export function computeDayWiseStats(records: EventRecord[]): DayWiseStat[] {
       divEntry.totalPasses += qty;
       divEntry.totalPassAmount += amt;
     } else if (r.record_type === 'DONATION') {
-      const amt = Number(r.total_payment_amount) || Number(r.item_payment_amount) || 0;
+      const amt = recordAmount(r);
       day.donationTransactions++;
       day.totalDonationAmount += amt;
       divEntry.donationTransactions++;
@@ -836,7 +847,7 @@ export function computeDivisionStats(records: EventRecord[]): DivisionStats[] {
 
     if (r.record_type === 'PASS') {
       const qty = Number(r.item_quantity) || 1;
-      const amt = Number(r.total_payment_amount) || Number(r.item_payment_amount) || 0;
+      const amt = recordAmount(r);
       item.passTransactions++;
       item.totalPasses += qty;
       item.totalPassAmount += amt;
@@ -844,7 +855,7 @@ export function computeDivisionStats(records: EventRecord[]): DivisionStats[] {
       vol.passTransactions++;
       dayItem.passes += qty;
     } else if (r.record_type === 'DONATION') {
-      const amt = Number(r.total_payment_amount) || Number(r.item_payment_amount) || 0;
+      const amt = recordAmount(r);
       item.donationTransactions++;
       item.totalDonationAmount += amt;
       vol.donations += amt;
@@ -1025,19 +1036,20 @@ export async function getDashboardStats(eventId?: string): Promise<DashboardStat
         batchQuery = batchQuery.eq('event_id', eventId);
       }
 
-      const [records, { data: latestBatches }] = await Promise.all([
+      const [allRecords, { data: latestBatches }] = await Promise.all([
         fetchSupabaseRecords(client, eventId),
         batchQuery.limit(1),
       ]);
+      const records = allRecords.filter(isCapturedRecord);
 
       const passes = records.filter((r) => r.record_type === 'PASS');
       const donations = records.filter((r) => r.record_type === 'DONATION');
 
       const totalCapturedPasses = passes.reduce((acc, curr) => acc + (Number(curr.item_quantity) || 1), 0);
-      const totalCapturedPassAmount = passes.reduce((acc, curr) => acc + (Number(curr.total_payment_amount) || Number(curr.item_payment_amount) || 0), 0);
+      const totalCapturedPassAmount = passes.reduce((acc, curr) => acc + recordAmount(curr), 0);
       const passTransactions = passes.length;
       const capturedDonations = donations.length;
-      const totalDonationAmount = donations.reduce((acc, curr) => acc + (Number(curr.total_payment_amount) || Number(curr.item_payment_amount) || 0), 0);
+      const totalDonationAmount = donations.reduce((acc, curr) => acc + recordAmount(curr), 0);
       const totalRevenue = totalCapturedPassAmount + totalDonationAmount;
 
       const divisionStats = computeDivisionStats(records);
@@ -1064,7 +1076,7 @@ export async function getDashboardStats(eventId?: string): Promise<DashboardStat
   }
 
   const local = readLocalDb();
-  let records = local.records;
+  let records = local.records.filter(isCapturedRecord);
   let batches = local.batches;
 
   if (eventId && eventId !== 'all') {
@@ -1076,10 +1088,10 @@ export async function getDashboardStats(eventId?: string): Promise<DashboardStat
   const donations = records.filter((r) => r.record_type === 'DONATION');
 
   const totalCapturedPasses = passes.reduce((acc, curr) => acc + (Number(curr.item_quantity) || 1), 0);
-  const totalCapturedPassAmount = passes.reduce((acc, curr) => acc + (Number(curr.total_payment_amount) || Number(curr.item_payment_amount) || 0), 0);
+  const totalCapturedPassAmount = passes.reduce((acc, curr) => acc + recordAmount(curr), 0);
   const passTransactions = passes.length;
   const capturedDonations = donations.length;
-  const totalDonationAmount = donations.reduce((acc, curr) => acc + (Number(curr.total_payment_amount) || Number(curr.item_payment_amount) || 0), 0);
+  const totalDonationAmount = donations.reduce((acc, curr) => acc + recordAmount(curr), 0);
   const totalRevenue = totalCapturedPassAmount + totalDonationAmount;
 
   const divisionStats = computeDivisionStats(records);

@@ -194,7 +194,8 @@ export async function analyzeExcelBuffer(
       warnings.push(`Row ${i + 2} (${orderId}): Pass quantity missing or 0. Defaulted to 1.`);
     }
 
-    // Always read total_payment_amount first (as per Razorpay export format).
+    // total_payment_amount is the whole order (a pass + donation order repeats it on both rows),
+    // so per-row amounts and totals use the item payment amount.
     const totalAmt = parseFloat(rawTotalAmt) || parseFloat(rawItemAmt) || 0;
     const itemAmt = parseFloat(rawItemAmt) || totalAmt;
 
@@ -243,11 +244,11 @@ export async function analyzeExcelBuffer(
       }
     } else if (isDonation) {
       donationTransactions++;
-      totalDonationAmount += totalAmt;
+      totalDonationAmount += itemAmt;
 
       if (!isDuplicate) {
         newDonationTransactions++;
-        newDonationAmount += totalAmt;
+        newDonationAmount += itemAmt;
         if (previewDonations.length < 5) {
           previewDonations.push({
             order_id: orderId,
@@ -256,13 +257,13 @@ export async function analyzeExcelBuffer(
             email,
             item_name: itemName,
             item_quantity: validQty,
-            item_payment_amount: totalAmt,
+            item_payment_amount: itemAmt,
             divisions,
           });
         }
       } else {
         existingDonationTransactions++;
-        existingDonationAmount += totalAmt;
+        existingDonationAmount += itemAmt;
       }
     }
   }

@@ -163,7 +163,7 @@ export function generateGarbaGroovePassHTML(record: EventRecord, qrCodeOverride?
   const mobile = record.phone || 'N/A';
   const email = record.email || 'N/A';
   const admits = record.item_quantity || 1;
-  const amount = `${record.total_payment_amount || record.item_payment_amount || record.item_amount || 0}/-`;
+  const amount = `${record.item_payment_amount || record.total_payment_amount || record.item_amount || 0}/-`;
   const l1Name = record.divisions || 'Street Cause';
   const l2Name = record.l2 || 'Event Team';
 
@@ -456,7 +456,7 @@ export function generateNavratriUtsavPassHTML(record: EventRecord, qrCodeOverrid
   const mobile = record.phone || 'N/A';
   const email = record.email || 'N/A';
   const admits = record.item_quantity || 1;
-  const amount = `${record.total_payment_amount || record.item_payment_amount || record.item_amount || 0}/-`;
+  const amount = `${record.item_payment_amount || record.total_payment_amount || record.item_amount || 0}/-`;
   const l1Name = record.divisions || 'Street Cause';
   const l2Name = record.l2 || 'Event Team';
 

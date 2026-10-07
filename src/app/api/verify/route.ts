@@ -51,7 +51,7 @@ export async function GET(request: NextRequest) {
         phone: record.phone || 'N/A',
         item_name: record.item_name || 'Event Pass',
         item_quantity: record.item_quantity || 1,
-        item_payment_amount: record.total_payment_amount || record.item_payment_amount || record.item_amount || 0,
+        item_payment_amount: record.item_payment_amount || record.total_payment_amount || record.item_amount || 0,
         total_payment_amount: record.total_payment_amount || record.item_payment_amount || record.item_amount || 0,
         payment_status: record.payment_status || 'Paid',
         divisions: record.divisions || 'N/A',

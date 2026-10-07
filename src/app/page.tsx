@@ -3575,7 +3575,7 @@ export default function Home() {
                         <td className="py-3 px-4 font-mono text-slate-300">{rec.pan_number || '-'}</td>
                         <td className="py-3 px-4 text-slate-200">{rec.item_name}</td>
                         <td className="py-3 px-4 font-bold text-rose-400">
-                          ₹{Number(rec.total_payment_amount || rec.item_payment_amount || 0).toLocaleString()}
+                          ₹{Number(rec.item_payment_amount || rec.total_payment_amount || 0).toLocaleString()}
                         </td>
                         <td className="py-3 px-4">
                           <span className="px-2 py-0.5 rounded-md text-[11px] bg-slate-800 text-slate-300">

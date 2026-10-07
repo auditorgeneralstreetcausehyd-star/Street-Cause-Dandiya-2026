@@ -307,7 +307,7 @@ function VerifyContent() {
 
                 <div className="bg-slate-950/50 p-4 rounded-xl border border-slate-800/80">
                   <span className="text-xs uppercase font-bold text-slate-400 block mb-1">Amount Paid</span>
-                  <span className="text-emerald-400 font-bold text-lg">₹{record.total_payment_amount || record.item_payment_amount}/-</span>
+                  <span className="text-emerald-400 font-bold text-lg">₹{record.item_payment_amount || record.total_payment_amount}/-</span>
                 </div>
 
                 <div className="bg-slate-950/50 p-4 rounded-xl border border-slate-800/80">
