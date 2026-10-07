@@ -856,6 +856,15 @@ export default function Home() {
     ? activeDayStat.donationTransactions
     : stats?.capturedDonations || 0;
 
+  const displayPassAmount = activeHourStat
+    ? activeHourStat.totalPassAmount || 0
+    : activeDayStat
+    ? activeDayStat.totalPassAmount || 0
+    : stats?.totalCapturedPassAmount || 0;
+
+  // Event revenue = pass sales + donations, for the same date/hour scope as the other cards
+  const displayTotalRevenue = displayPassAmount + displayTotalDonations;
+
   const peakHour = activeHourlyList.reduce<HourlyStat | null>((max, curr) => {
     if (!max || curr.totalTransactions > max.totalTransactions) {
       return curr.totalTransactions > 0 ? curr : null;
@@ -1498,6 +1507,47 @@ export default function Home() {
                     ? 'Displaying all-time metrics'
                     : `Filtered: ${selectedDateFilter !== 'all' ? activeDayStat?.displayDate : 'All Days'} • ${selectedHourFilter !== 'all' ? ALL_HOURS_META[Number(selectedHourFilter)]?.hourDisplay : '24h'}`}
                 </span>
+              </div>
+            </div>
+
+            {/* Total Event Revenue (passes + donations) */}
+            <div className="bg-slate-900/90 border border-emerald-500/30 rounded-2xl p-5 shadow-lg">
+              <div className="flex flex-col md:flex-row md:items-center justify-between gap-4">
+                <div className="flex items-center gap-4">
+                  <div className="w-12 h-12 rounded-2xl bg-emerald-500/10 text-emerald-400 flex items-center justify-center text-2xl font-extrabold">
+                    ₹
+                  </div>
+                  <div>
+                    <span className="text-xs font-semibold text-slate-400 uppercase tracking-wider">
+                      {selectedHourFilter !== 'all' || selectedDateFilter !== 'all'
+                        ? 'Filtered Event Revenue'
+                        : `Total Event Revenue${
+                            selectedEvent === 'navratri_utsav'
+                              ? ' · Navratri Utsav'
+                              : selectedEvent === 'garba_groove'
+                              ? ' · Garba Groove'
+                              : ' · All Events'
+                          }`}
+                    </span>
+                    <div className="text-3xl md:text-4xl font-extrabold text-emerald-400 tracking-tight">
+                      ₹{displayTotalRevenue.toLocaleString('en-IN')}
+                    </div>
+                  </div>
+                </div>
+                <div className="grid grid-cols-2 gap-3 md:min-w-[360px]">
+                  <div className="bg-slate-950 border border-slate-800 rounded-xl px-4 py-3">
+                    <div className="text-[11px] text-slate-400">Pass Sales</div>
+                    <div className="text-lg font-bold text-amber-400">₹{displayPassAmount.toLocaleString('en-IN')}</div>
+                    <div className="text-[10px] text-slate-500">
+                      {displayTotalPasses.toLocaleString('en-IN')} passes • {displayPassTransactions} txns
+                    </div>
+                  </div>
+                  <div className="bg-slate-950 border border-slate-800 rounded-xl px-4 py-3">
+                    <div className="text-[11px] text-slate-400">Donations</div>
+                    <div className="text-lg font-bold text-rose-400">₹{displayTotalDonations.toLocaleString('en-IN')}</div>
+                    <div className="text-[10px] text-slate-500">{displayDonationTransactions} donations</div>
+                  </div>
+                </div>
               </div>
             </div>
 
