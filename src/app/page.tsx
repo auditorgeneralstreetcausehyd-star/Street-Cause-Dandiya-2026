@@ -155,6 +155,8 @@ export default function Home() {
   const [volunteerDivisionFilter, setVolunteerDivisionFilter] = useState<string>('all');
   const [volunteerSortBy, setVolunteerSortBy] = useState<'passes' | 'donations' | 'totalTxns' | 'passTxns' | 'name'>('passes');
   const [volunteerSortOrder, setVolunteerSortOrder] = useState<'desc' | 'asc'>('desc');
+  // L1 pass-count band: show only L1s who sold fewer than N passes ('all' = no limit)
+  const [volunteerPassBand, setVolunteerPassBand] = useState<'all' | 10 | 30 | 50 | 75 | 100>('all');
 
   // Upload Flow State
   const [uploadTargetEvent, setUploadTargetEvent] = useState<'garba_groove' | 'navratri_utsav'>('garba_groove');
@@ -2217,18 +2219,27 @@ export default function Home() {
             {divisionViewMode === 'l1_volunteers' && (() => {
               const allL1Volunteers = (stats?.divisionStats || []).flatMap((div) => div.allVolunteers || []);
 
-              const filteredL1 = allL1Volunteers
-                .filter((vol) => {
-                  const matchesSearch =
-                    !volunteerSearch ||
-                    vol.name.toLowerCase().includes(volunteerSearch.toLowerCase()) ||
-                    vol.l2.toLowerCase().includes(volunteerSearch.toLowerCase()) ||
-                    vol.division.toLowerCase().includes(volunteerSearch.toLowerCase());
-                  const matchesDiv =
-                    volunteerDivisionFilter === 'all' ||
-                    vol.division.toLowerCase() === volunteerDivisionFilter.toLowerCase();
-                  return matchesSearch && matchesDiv;
-                })
+              // Search + division first, so the band counts reflect the current selection
+              const searchedL1 = allL1Volunteers.filter((vol) => {
+                const matchesSearch =
+                  !volunteerSearch ||
+                  vol.name.toLowerCase().includes(volunteerSearch.toLowerCase()) ||
+                  vol.l2.toLowerCase().includes(volunteerSearch.toLowerCase()) ||
+                  vol.division.toLowerCase().includes(volunteerSearch.toLowerCase());
+                const matchesDiv =
+                  volunteerDivisionFilter === 'all' ||
+                  vol.division.toLowerCase() === volunteerDivisionFilter.toLowerCase();
+                return matchesSearch && matchesDiv;
+              });
+
+              // "Under N" = sold fewer than N passes (bands are cumulative: Under 30 includes Under 10)
+              const passBands = [10, 30, 50, 75, 100] as const;
+              const passBandCounts = Object.fromEntries(
+                passBands.map((n) => [n, searchedL1.filter((v) => v.passes < n).length])
+              ) as Record<(typeof passBands)[number], number>;
+
+              const filteredL1 = searchedL1
+                .filter((vol) => volunteerPassBand === 'all' || vol.passes < volunteerPassBand)
                 .sort((a, b) => {
                   let diff = 0;
                   if (volunteerSortBy === 'passes') {
@@ -2295,6 +2306,37 @@ export default function Home() {
                         {topPerformer ? `${topPerformer.name} (${topPerformer.passes}p)` : '-'}
                       </div>
                       {topPerformer && <div className="text-[10px] text-amber-400">{topPerformer.division}</div>}
+                    </div>
+                  </div>
+
+                  {/* Passes-sold band filter with L1 counts */}
+                  <div className="bg-slate-900/90 border border-slate-800 p-4 rounded-2xl">
+                    <div className="flex flex-wrap items-center gap-2">
+                      <span className="text-xs text-slate-400 font-semibold mr-1">L1s by passes sold:</span>
+                      <button
+                        onClick={() => setVolunteerPassBand('all')}
+                        className={`px-3 py-1.5 rounded-lg text-xs font-bold border transition ${
+                          volunteerPassBand === 'all'
+                            ? 'bg-amber-500 text-slate-950 border-amber-500'
+                            : 'bg-slate-950 text-slate-300 border-slate-800 hover:border-amber-500/50'
+                        }`}
+                      >
+                        All <span className="opacity-80">({searchedL1.length})</span>
+                      </button>
+                      {passBands.map((n) => (
+                        <button
+                          key={n}
+                          onClick={() => setVolunteerPassBand(n)}
+                          title={`L1s who sold fewer than ${n} passes (0-${n - 1})`}
+                          className={`px-3 py-1.5 rounded-lg text-xs font-bold border transition ${
+                            volunteerPassBand === n
+                              ? 'bg-amber-500 text-slate-950 border-amber-500'
+                              : 'bg-slate-950 text-slate-300 border-slate-800 hover:border-amber-500/50'
+                          }`}
+                        >
+                          Under {n} <span className="opacity-80">({passBandCounts[n]})</span>
+                        </button>
+                      ))}
                     </div>
                   </div>
 
