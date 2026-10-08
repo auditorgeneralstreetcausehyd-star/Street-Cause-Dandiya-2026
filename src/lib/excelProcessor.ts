@@ -8,6 +8,7 @@ import {
   updateImportBatch,
 } from './db';
 import { syncToGoogleSheets } from './googleSheets';
+import { normalizeEmail } from './emailAddress';
 import {
   EventRecord,
   ImportBatch,
@@ -131,7 +132,7 @@ export async function analyzeExcelBuffer(
     const rawItemAmt = extractField(raw, ['item payment amount', 'item_payment_amount', 'item amount', 'amount', 'item_amount']);
     const rawTotalAmt = extractField(raw, ['total payment amount', 'total_payment_amount', 'total amount']);
     const name = extractField(raw, ['name', 'buyer name', 'customer name']);
-    const email = extractField(raw, ['email_id', 'email', 'email address']);
+    const email = normalizeEmail(extractField(raw, ['email_id', 'email', 'email address']));
     const divisions = extractField(raw, ['divisions', 'division']);
 
     // Check if status is captured
@@ -427,7 +428,7 @@ export async function processAndImportExcel(
       currency: extractField(raw, ['currency']) || 'INR',
       payment_status: status,
       payment_id: extractField(raw, ['payment id', 'payment_id']),
-      email: extractField(raw, ['email_id', 'email', 'email address']),
+      email: normalizeEmail(extractField(raw, ['email_id', 'email', 'email address'])),
       phone: extractField(raw, ['phone', 'mobile', 'contact']),
       name: extractField(raw, ['name', 'buyer name', 'customer name']),
       pan_number: extractField(raw, ['pan_number', 'pan', 'pan number']),

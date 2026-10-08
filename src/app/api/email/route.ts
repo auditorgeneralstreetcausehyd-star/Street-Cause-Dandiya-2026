@@ -4,6 +4,7 @@ import { requireAuth } from '@/lib/auth';
 import { checkRateLimit } from '@/lib/rateLimit';
 import { EmailBatch, EmailDispatchLog, EventRecord } from '@/lib/types';
 import { processEmailBatchStep, getSenderQuota } from '@/lib/emailWorker';
+import { normalizeEmail } from '@/lib/emailAddress';
 
 export async function POST(request: NextRequest) {
   try {
@@ -94,7 +95,7 @@ export async function POST(request: NextRequest) {
       batch_id: batchId,
       order_id: r.order_id,
       event_id: r.event_id || targetEventId,
-      recipient_email: (r.email || '').trim(),
+      recipient_email: normalizeEmail(r.email),
       status: 'QUEUED',
       attempt_count: 0,
       created_at: nowIso,

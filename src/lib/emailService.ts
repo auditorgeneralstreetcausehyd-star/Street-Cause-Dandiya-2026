@@ -4,6 +4,7 @@ import path from 'path';
 import QRCode from 'qrcode';
 import { EVENT_CONFIGS, EventRecord } from './types';
 import { getSettings } from './db';
+import { normalizeEmail, isValidEmail } from './emailAddress';
 
 export async function generateQRCodeDataURL(verifyUrl: string): Promise<string> {
   try {
@@ -812,8 +813,9 @@ export async function sendPassEmail(
       return { success: false, isTemporary: false, error: 'No email address provided for this attendee' };
     }
 
-    const emailTrimmed = record.email.trim();
-    if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(emailTrimmed)) {
+    // Buyers type addresses with stray spaces and capitals; send to the cleaned form
+    const emailTrimmed = normalizeEmail(record.email);
+    if (!isValidEmail(emailTrimmed)) {
       return { success: false, isTemporary: false, error: `Invalid email address format: ${emailTrimmed}` };
     }
 

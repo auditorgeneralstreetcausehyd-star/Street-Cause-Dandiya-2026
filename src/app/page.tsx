@@ -155,7 +155,7 @@ export default function Home() {
   const [volunteerDivisionFilter, setVolunteerDivisionFilter] = useState<string>('all');
   const [volunteerSortBy, setVolunteerSortBy] = useState<'passes' | 'donations' | 'totalTxns' | 'passTxns' | 'name'>('passes');
   const [volunteerSortOrder, setVolunteerSortOrder] = useState<'desc' | 'asc'>('desc');
-  // L1 pass-count band: show only L1s who sold fewer than N passes ('all' = no limit)
+  // L1 pass-count band: "Under N" = previous band's limit up to N-1 passes ('all' = no limit)
   const [volunteerPassBand, setVolunteerPassBand] = useState<'all' | 10 | 30 | 50 | 75 | 100>('all');
 
   // Upload Flow State
@@ -2232,14 +2232,18 @@ export default function Home() {
                 return matchesSearch && matchesDiv;
               });
 
-              // "Under N" = sold fewer than N passes (bands are cumulative: Under 30 includes Under 10)
+              // Non-overlapping bands: "Under N" = from the previous band's limit up to N-1 passes
+              // (Under 10 = 0-9, Under 30 = 10-29, Under 50 = 30-49, Under 75 = 50-74, Under 100 = 75-99)
               const passBands = [10, 30, 50, 75, 100] as const;
+              const passBandFloor: Record<(typeof passBands)[number], number> = { 10: 0, 30: 10, 50: 30, 75: 50, 100: 75 };
+              const inPassBand = (passes: number, n: (typeof passBands)[number]) =>
+                passes >= passBandFloor[n] && passes < n;
               const passBandCounts = Object.fromEntries(
-                passBands.map((n) => [n, searchedL1.filter((v) => v.passes < n).length])
+                passBands.map((n) => [n, searchedL1.filter((v) => inPassBand(v.passes, n)).length])
               ) as Record<(typeof passBands)[number], number>;
 
               const filteredL1 = searchedL1
-                .filter((vol) => volunteerPassBand === 'all' || vol.passes < volunteerPassBand)
+                .filter((vol) => volunteerPassBand === 'all' || inPassBand(vol.passes, volunteerPassBand))
                 .sort((a, b) => {
                   let diff = 0;
                   if (volunteerSortBy === 'passes') {
@@ -2327,7 +2331,7 @@ export default function Home() {
                         <button
                           key={n}
                           onClick={() => setVolunteerPassBand(n)}
-                          title={`L1s who sold fewer than ${n} passes (0-${n - 1})`}
+                          title={`L1s who sold ${passBandFloor[n]}-${n - 1} passes`}
                           className={`px-3 py-1.5 rounded-lg text-xs font-bold border transition ${
                             volunteerPassBand === n
                               ? 'bg-amber-500 text-slate-950 border-amber-500'
