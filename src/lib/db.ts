@@ -1,4 +1,5 @@
 import { createClient, SupabaseClient } from '@supabase/supabase-js';
+import crypto from 'crypto';
 import fs from 'fs';
 import path from 'path';
 import os from 'os';
@@ -1122,10 +1123,11 @@ export async function getRecords(params: {
   division?: string;
   date?: string;
   hour?: number | string;
+  paymentStatus?: string; // e.g. 'manual' to list only admin-entered passes
   limit?: number;
   offset?: number;
 }): Promise<{ records: EventRecord[]; total: number }> {
-  const { type, eventId, search, division, date, hour, limit = 50, offset = 0 } = params;
+  const { type, eventId, search, division, date, hour, paymentStatus, limit = 50, offset = 0 } = params;
 
   const client = getSupabaseClient();
   if (isUsingSupabase() && client) {
@@ -1138,6 +1140,7 @@ export async function getRecords(params: {
           fetchAllMatching(client, table, (query) => {
             let q = query;
             if (division && division !== 'all') q = q.eq('divisions', division);
+            if (paymentStatus) q = q.eq('payment_status', paymentStatus);
             if (searchTerm) {
               q = q.or(SEARCH_COLUMNS.map((col) => `${col}.ilike.%${searchTerm}%`).join(','));
             }
@@ -1174,6 +1177,9 @@ export async function getRecords(params: {
   }
   if (division && division !== 'all') {
     list = list.filter((r) => r.divisions === division);
+  }
+  if (paymentStatus) {
+    list = list.filter((r) => r.payment_status === paymentStatus);
   }
   if (date && date !== 'all') {
     list = list.filter((r) => parseRecordDateTime(r.payment_date || r.created_at).isoDate === date);
@@ -1257,15 +1263,23 @@ export async function updateRecordEmailStatus(
     const corePayload: Record<string, unknown> = { email_status: status };
     if (status === 'Sent') corePayload.email_sent_at = updatePayload.email_sent_at;
 
+    // Retry with pauses: on a flaky connection a lost update left a delivered pass stuck on "Sending"
+    const retryDelaysMs = [0, 1000, 3000];
     await Promise.all(
       ALL_RECORD_TABLES.map(async (table) => {
-        const { error } = await client.from(table).update(updatePayload).eq('order_id', orderId);
-        if (!error) return;
-        console.warn(`updateRecordEmailStatus on ${table} failed (${error.message}); retrying with core columns`);
-        const { error: coreErr } = await client.from(table).update(corePayload).eq('order_id', orderId);
-        if (coreErr) {
-          console.error(`updateRecordEmailStatus on ${table} failed: ${coreErr.message}`);
+        let payload = updatePayload;
+        let lastError = '';
+        for (const delay of retryDelaysMs) {
+          if (delay) await new Promise((resolve) => setTimeout(resolve, delay));
+          const { error } = await client.from(table).update(payload).eq('order_id', orderId);
+          if (!error) return;
+          lastError = error.message;
+          if (payload !== corePayload && /email_last_attempt_at|email_error|column/i.test(error.message)) {
+            console.warn(`updateRecordEmailStatus on ${table}: ${error.message}; retrying with core columns`);
+            payload = corePayload;
+          }
         }
+        console.error(`updateRecordEmailStatus on ${table} failed after retries: ${lastError}`);
       })
     );
   }
@@ -1282,6 +1296,121 @@ export async function updateRecordEmailStatus(
     };
     writeLocalDb(local);
   }
+}
+
+/**
+ * Replace a pass holder's email (e.g. after a bounce) and reset it to Pending so it can be sent again.
+ * Returns the updated record, or null if no pass has that order_id.
+ */
+export async function updatePassEmail(orderId: string, email: string): Promise<EventRecord | null> {
+  const payload = { email, email_status: 'Pending', email_error: null, email_sent_at: null };
+  const client = getSupabaseClient();
+  if (isUsingSupabase() && client) {
+    for (const table of ['garba_groove_passes', 'navratri_utsav_passes']) {
+      let { data, error } = await client.from(table).update(payload).eq('order_id', orderId).select();
+      if (error && /email_error|column/i.test(error.message)) {
+        // email_error not migrated yet: update without it
+        const { email_error: _skip, ...core } = payload;
+        ({ data, error } = await client.from(table).update(core).eq('order_id', orderId).select());
+      }
+      if (error) throw new Error(`Failed to update email: ${error.message}`);
+      if (data && data.length > 0) return data[0] as EventRecord;
+    }
+    return null;
+  }
+
+  const local = readLocalDb();
+  const idx = local.records.findIndex((r) => r.order_id === orderId && r.record_type === 'PASS');
+  if (idx === -1) return null;
+  local.records[idx] = { ...local.records[idx], ...payload, email_status: 'Pending' };
+  writeLocalDb(local);
+  return local.records[idx];
+}
+
+// ---------------------------------------------------------------------------
+// MANUAL PASSES (entered by an admin, not from Razorpay)
+// ---------------------------------------------------------------------------
+
+export const MANUAL_CODE_PREFIX = 'SC';
+export const MANUAL_PAYMENT_STATUS = 'manual';
+
+// No look-alike characters (0/O, 1/I/L) so gate staff can read codes off a screen reliably
+const MANUAL_CODE_ALPHABET = 'ABCDEFGHJKMNPQRSTUVWXYZ23456789';
+const MANUAL_CODE_LENGTH = 8;
+
+/** Random, unguessable pass code: "SC" + 8 characters, e.g. SC7KQ4M9XP */
+function generateManualCode(): string {
+  let code = MANUAL_CODE_PREFIX;
+  for (let i = 0; i < MANUAL_CODE_LENGTH; i++) {
+    code += MANUAL_CODE_ALPHABET[crypto.randomInt(MANUAL_CODE_ALPHABET.length)];
+  }
+  return code;
+}
+
+/**
+ * Create a manual pass with a random SC######## code. The code is the order_id (unique per table), so in
+ * the (astronomically unlikely) event of a collision the insert fails and a fresh code is generated.
+ */
+export async function createManualPass(input: {
+  eventId: 'garba_groove' | 'navratri_utsav';
+  name: string;
+  email: string;
+  phone: string;
+  quantity: number;
+  amount: number;
+  createdBy?: string;
+}): Promise<EventRecord> {
+  const tableName = getRecordTableName(input.eventId, 'PASS');
+  const eventName = input.eventId === 'navratri_utsav' ? 'Navratri Utsav 2026' : 'Garba Groove 2026';
+  const nowIso = new Date().toISOString();
+  const client = getSupabaseClient();
+
+  for (let attempt = 0; attempt < 5; attempt++) {
+    const code = generateManualCode();
+    const record: EventRecord = {
+      id: `rec_manual_${Date.now()}_${Math.random().toString(36).substring(2, 8)}`,
+      order_id: code,
+      code,
+      event_id: input.eventId,
+      event_name: eventName,
+      record_type: 'PASS',
+      payment_page_title: 'Manual entry',
+      payment_date: nowIso,
+      item_name: 'Dandiya pass',
+      item_amount: input.quantity > 0 ? input.amount / input.quantity : 0,
+      item_quantity: input.quantity,
+      item_payment_amount: input.amount,
+      total_payment_amount: input.amount,
+      currency: 'INR',
+      // Not a Razorpay capture: kept out of the captured-only sales/revenue figures
+      payment_status: MANUAL_PAYMENT_STATUS,
+      email: input.email,
+      phone: input.phone,
+      name: input.name,
+      source_file: `manual_entry${input.createdBy ? `:${input.createdBy}` : ''}`,
+      import_batch_id: '',
+      email_status: 'Pending',
+      email_sent_at: null,
+      attendance_status: 'PENDING',
+      checked_in_at: null,
+      created_at: nowIso,
+    };
+
+    if (isUsingSupabase() && client) {
+      const { import_batch_id: _noBatch, ...row } = record;
+      const { error } = await client.from(tableName).insert([{ ...row, import_batch_id: null }]);
+      if (!error) return record;
+      if (error.code === '23505') continue; // code already used: generate another
+      throw new Error(`Failed to save manual pass: ${error.message}`);
+    }
+
+    const local = readLocalDb();
+    if (local.records.some((r) => r.order_id === code)) continue;
+    local.records.push(record);
+    writeLocalDb(local);
+    return record;
+  }
+  throw new Error('Could not allocate a unique pass code; please try again.');
 }
 
 // Get All Batches with Event Filter
@@ -1535,12 +1664,16 @@ export async function createEmailBatch(
 export async function getEmailBatch(batchId: string): Promise<import('./types').EmailBatch | null> {
   const client = getSupabaseClient();
   if (isUsingSupabase() && client) {
+    let failure: string | null = null;
     try {
       const { data, error } = await client.from('email_batches').select('*').eq('batch_id', batchId).single();
       if (!error && data) return data as import('./types').EmailBatch;
+      if (error && error.code !== 'PGRST116') failure = error.message; // PGRST116 = no such batch
     } catch (err) {
-      console.warn('Supabase getEmailBatch fallback local:', err);
+      failure = err instanceof Error ? err.message : String(err);
     }
+    // A timeout on a flaky connection must not look like "batch not found" (pollers treated live batches as gone)
+    if (failure) throw new Error(`Database temporarily unreachable: ${failure}`);
   }
 
   const local = readLocalDb();

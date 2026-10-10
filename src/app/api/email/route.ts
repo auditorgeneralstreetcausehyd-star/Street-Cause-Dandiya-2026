@@ -88,6 +88,8 @@ export async function POST(request: NextRequest) {
     // 4. Create Batch Model & Dispatch Jobs
     const batchId = `BATCH-${Date.now()}-${Math.random().toString(36).substring(2, 7).toUpperCase()}`;
     const targetEventId = eventId && eventId !== 'all' ? eventId : eligibleRecords[0]?.event_id || 'garba_groove';
+    // A batch spanning both events is labelled 'all' (each job still carries its own event_id)
+    const batchEventId = new Set(eligibleRecords.map((r) => r.event_id || targetEventId)).size > 1 ? 'all' : targetEventId;
     const nowIso = new Date().toISOString();
 
     const jobs: EmailDispatchLog[] = eligibleRecords.map((r) => ({
@@ -104,7 +106,7 @@ export async function POST(request: NextRequest) {
 
     const batch: EmailBatch = {
       batch_id: batchId,
-      event_id: targetEventId,
+      event_id: batchEventId,
       requested_by: authCheck.session?.email || 'admin',
       total: jobs.length,
       queued: jobs.length,

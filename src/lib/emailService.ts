@@ -164,7 +164,11 @@ export function generateGarbaGroovePassHTML(record: EventRecord, qrCodeOverride?
   const mobile = record.phone || 'N/A';
   const email = record.email || 'N/A';
   const admits = record.item_quantity || 1;
-  const amount = `${record.item_payment_amount || record.total_payment_amount || record.item_amount || 0}/-`;
+  const isManualPass = record.payment_status === 'manual';
+  const amountValue = record.item_payment_amount || record.total_payment_amount || record.item_amount || 0;
+  // Manual passes may have no amount recorded (guest / not entered): show a dash rather than "0/-"
+  const amount = isManualPass && !amountValue ? '—' : `${amountValue}/-`;
+  const paymentMode = isManualPass ? 'Offline' : 'Online';
   const l1Name = record.divisions || 'Street Cause';
   const l2Name = record.l2 || 'Event Team';
 
@@ -300,7 +304,7 @@ export function generateGarbaGroovePassHTML(record: EventRecord, qrCodeOverride?
                           <div style="margin-bottom: 4px;"><span class="label-text">Code :</span> <span class="value-text" style="color: #fbbf24; font-weight: 700;">${codeValue}</span></div>
                           <div style="margin-bottom: 4px;"><span class="label-text">mobile :</span> <span class="value-text">${mobile}</span></div>
                           <div style="margin-bottom: 4px;"><span class="label-text">Email ID:</span> <span class="value-text email-value" style="font-size: 10.5px;">${email}</span></div>
-                          <div style="margin-bottom: 4px;"><span class="label-text">Payment mode:</span> <span class="value-text">Online</span></div>
+                          <div style="margin-bottom: 4px;"><span class="label-text">Payment mode:</span> <span class="value-text">${paymentMode}</span></div>
                           <div style="margin-bottom: 4px;"><span class="label-text">Type:</span> <span class="value-text">Event Pass</span></div>
                         </td>
 
@@ -457,7 +461,11 @@ export function generateNavratriUtsavPassHTML(record: EventRecord, qrCodeOverrid
   const mobile = record.phone || 'N/A';
   const email = record.email || 'N/A';
   const admits = record.item_quantity || 1;
-  const amount = `${record.item_payment_amount || record.total_payment_amount || record.item_amount || 0}/-`;
+  const isManualPass = record.payment_status === 'manual';
+  const amountValue = record.item_payment_amount || record.total_payment_amount || record.item_amount || 0;
+  // Manual passes may have no amount recorded (guest / not entered): show a dash rather than "0/-"
+  const amount = isManualPass && !amountValue ? '—' : `${amountValue}/-`;
+  const paymentMode = isManualPass ? 'Offline' : 'Online';
   const l1Name = record.divisions || 'Street Cause';
   const l2Name = record.l2 || 'Event Team';
 
@@ -593,7 +601,7 @@ export function generateNavratriUtsavPassHTML(record: EventRecord, qrCodeOverrid
                           <div style="margin-bottom: 4px;"><span class="label-text">Code :</span> <span class="value-text" style="color: #f472b6; font-weight: 700;">${codeValue}</span></div>
                           <div style="margin-bottom: 4px;"><span class="label-text">mobile :</span> <span class="value-text">${mobile}</span></div>
                           <div style="margin-bottom: 4px;"><span class="label-text">Email ID:</span> <span class="value-text email-value" style="font-size: 10.5px;">${email}</span></div>
-                          <div style="margin-bottom: 4px;"><span class="label-text">Payment mode:</span> <span class="value-text">Online</span></div>
+                          <div style="margin-bottom: 4px;"><span class="label-text">Payment mode:</span> <span class="value-text">${paymentMode}</span></div>
                           <div style="margin-bottom: 4px;"><span class="label-text">Type:</span> <span class="value-text">Event Pass</span></div>
                         </td>
 
@@ -780,7 +788,8 @@ export function classifySmtpError(error: unknown): { isTemporary: boolean; code?
   }
 
   // Common transient socket / connection codes
-  const transientCodeStrings = ['ETIMEDOUT', 'ECONNRESET', 'ECONNREFUSED', 'EHOSTUNREACH', 'ENOTFOUND', 'ESOCKETTIMEDOUT'];
+  // ESOCKET / ECONNECTION / EDNS are nodemailer's wrappers for dropped or failed network connections
+  const transientCodeStrings = ['ETIMEDOUT', 'ECONNRESET', 'ECONNREFUSED', 'EHOSTUNREACH', 'ENOTFOUND', 'ESOCKETTIMEDOUT', 'ESOCKET', 'ECONNECTION', 'EDNS', 'EAI_AGAIN', 'ENETUNREACH', 'EPIPE'];
   if (typeof code === 'string' && transientCodeStrings.includes(code.toUpperCase())) {
     return { isTemporary: true, code, message };
   }
@@ -794,6 +803,10 @@ export function classifySmtpError(error: unknown): { isTemporary: boolean; code?
     lowerMsg.includes('busy') ||
     lowerMsg.includes('timeout') ||
     lowerMsg.includes('connection closed') ||
+    lowerMsg.includes('econnreset') ||
+    lowerMsg.includes('etimedout') ||
+    lowerMsg.includes('socket') ||
+    lowerMsg.includes('network') ||
     lowerMsg.includes('too many connections')
   ) {
     return { isTemporary: true, code: code || 421, message };

@@ -48,3 +48,6 @@ scratch/
 # source images (emails use Cloudinary)
 /Pass Assets/
 /public/pass_assets/
+
+# call lists with attendee personal data
+/followups/

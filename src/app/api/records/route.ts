@@ -27,12 +27,13 @@ export async function GET(req: NextRequest) {
     const division = searchParams.get('division') || undefined;
     const date = searchParams.get('date') || undefined;
     const hour = searchParams.get('hour') || undefined;
+    const paymentStatus = searchParams.get('paymentStatus') || undefined;
     const search = searchParams.get('search') || '';
     const limit = parseInt(searchParams.get('limit') || '50', 10);
     const offset = parseInt(searchParams.get('offset') || '0', 10);
     const forceRefresh = searchParams.get('forceRefresh') === 'true';
 
-    const cacheKey = `records_${type || 'ALL'}_${eventId || 'ALL'}_${division || 'ALL'}_${date || 'ALL'}_${hour || 'ALL'}_${search}_${limit}_${offset}`;
+    const cacheKey = `records_${type || 'ALL'}_${eventId || 'ALL'}_${division || 'ALL'}_${date || 'ALL'}_${hour || 'ALL'}_${paymentStatus || 'ALL'}_${search}_${limit}_${offset}`;
 
     if (forceRefresh) {
       invalidateCache(cacheKey);
@@ -42,7 +43,7 @@ export async function GET(req: NextRequest) {
     const { data: result, isCached, ageSeconds } = await getOrSetCache(
       cacheKey,
       async () => {
-        const result = await getRecords({ type, eventId, division, date, hour, search, limit, offset });
+        const result = await getRecords({ type, eventId, division, date, hour, paymentStatus, search, limit, offset });
         return { ...result, records: await attachEmailSenders(result.records) };
       },
       30

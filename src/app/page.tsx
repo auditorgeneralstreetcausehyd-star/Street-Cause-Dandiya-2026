@@ -51,8 +51,11 @@ import {
   ArrowUpDown,
   ArrowUp,
   ArrowDown,
-  IndianRupee
+  IndianRupee,
+  GraduationCap,
+  PencilLine
 } from 'lucide-react';
+import { computeMentorStats, UNASSIGNED_MENTOR } from '@/lib/mentors';
 import { DashboardStats, ImportBatch, EventRecord, PreImportAnalysis, EventId, DayWiseStat, HourlyStat, VolunteerStat, DivisionStats, SystemSettings, EmailBatch } from '@/lib/types';
 
 const ALL_HOURS_META = Array.from({ length: 24 }, (_, h) => {
@@ -130,7 +133,7 @@ export default function Home() {
   const [showEventHub, setShowEventHub] = useState<boolean>(false);
 
   // Navigation & Role State
-  const [activeTab, setActiveTab] = useState<'dashboard' | 'divisions' | 'upload' | 'history' | 'passes' | 'donations' | 'system'>('dashboard');
+  const [activeTab, setActiveTab] = useState<'dashboard' | 'divisions' | 'upload' | 'history' | 'passes' | 'manual' | 'donations' | 'system'>('dashboard');
 
   // Stats & Core Data
   const [stats, setStats] = useState<DashboardStats | null>(null);
@@ -149,7 +152,7 @@ export default function Home() {
   const [divisionSortBy, setDivisionSortBy] = useState<'passes' | 'donations' | 'revenue' | 'total'>('passes');
   const [selectedDateFilter, setSelectedDateFilter] = useState<string>('all');
   const [selectedHourFilter, setSelectedHourFilter] = useState<string>('all');
-  const [divisionViewMode, setDivisionViewMode] = useState<'cards' | 'l1_volunteers' | 'daywise_timeline'>('cards');
+  const [divisionViewMode, setDivisionViewMode] = useState<'cards' | 'l1_volunteers' | 'mentors' | 'daywise_timeline'>('cards');
   const [expandedDivisionVolunteers, setExpandedDivisionVolunteers] = useState<string | null>(null);
   const [volunteerSearch, setVolunteerSearch] = useState<string>('');
   const [volunteerDivisionFilter, setVolunteerDivisionFilter] = useState<string>('all');
@@ -183,6 +186,11 @@ export default function Home() {
     batchId?: string | null;
   } | null>(null);
   const [activeBatches, setActiveBatches] = useState<EmailBatch[]>([]);
+  // Batch this tab is driving via handleSendEmails, so the background driver doesn't poll it twice
+  const dispatchProgressBatchIdRef = useRef<string | null>(null);
+  // Recent (time, processed) samples per batch, for an ETA that reflects current speed rather than any stall
+  const batchProgressSamplesRef = useRef<Record<string, { at: number; done: number }[]>>({});
+  const [batchRates, setBatchRates] = useState<Record<string, number | null>>({});
   // Remaining sends across all rotated Gmail sender accounts (rolling 24h)
   const [senderQuota, setSenderQuota] = useState<{
     totalRemaining: number;
@@ -196,6 +204,36 @@ export default function Home() {
       if (data.success) setSenderQuota({ totalRemaining: data.totalRemaining, accounts: data.accounts || [] });
     } catch (err) {
       console.warn('Failed to load sender quota:', err);
+    }
+  }, []);
+
+  // Manual passes: admin-entered passes with random SC######## codes
+  const [manualForm, setManualForm] = useState<{
+    eventId: 'garba_groove' | 'navratri_utsav';
+    name: string;
+    email: string;
+    phone: string;
+    quantity: string;
+    amount: string;
+  }>({ eventId: 'garba_groove', name: '', email: '', phone: '', quantity: '1', amount: '' });
+  const [manualSubmitting, setManualSubmitting] = useState(false);
+  const [manualError, setManualError] = useState<string | null>(null);
+  const [manualLastCreated, setManualLastCreated] = useState<EventRecord | null>(null);
+  const [manualPasses, setManualPasses] = useState<EventRecord[]>([]);
+
+  const fetchManualPasses = useCallback(async () => {
+    try {
+      const res = await fetch('/api/records?type=PASS&paymentStatus=manual&limit=1000&forceRefresh=true');
+      const data = await res.json();
+      if (data.success) {
+        setManualPasses(
+          (data.records as EventRecord[]).sort(
+            (a, b) => new Date(b.created_at).getTime() - new Date(a.created_at).getTime()
+          )
+        );
+      }
+    } catch (err) {
+      console.warn('Failed to load manual passes:', err);
     }
   }, []);
 
@@ -322,12 +360,18 @@ export default function Home() {
 
   // Asynchronous Batch Email Dispatcher with live status polling
   // force = explicit resend, re-delivers passes that were already Sent
-  const handleSendEmails = async (orderIds: string[], force = false) => {
+  // eventOverride: send for a specific event regardless of the event selected in the header (manual passes)
+  const handleSendEmails = async (
+    orderIds: string[],
+    force = false,
+    eventOverride?: 'garba_groove' | 'navratri_utsav'
+  ) => {
     if (orderIds.length === 0) return;
 
     setEmailSending(true);
     // 'all' lets the API match passes from either event instead of only Garba Groove
-    const targetEvent = selectedEvent === 'navratri_utsav' || selectedEvent === 'garba_groove' ? selectedEvent : 'all';
+    const targetEvent =
+      eventOverride || (selectedEvent === 'navratri_utsav' || selectedEvent === 'garba_groove' ? selectedEvent : 'all');
     setDispatchProgress({
       current: 0,
       total: orderIds.length,
@@ -364,6 +408,7 @@ export default function Home() {
         return;
       }
 
+      dispatchProgressBatchIdRef.current = batchId;
       setDispatchProgress({
         current: 0,
         total: data.queued || orderIds.length,
@@ -423,7 +468,13 @@ export default function Home() {
             `They are still Pending. Use "Send All Pending" again once the limit frees up (rolling 24 hours).`
         );
       } else if (!isCompleted) {
-        alert('Email dispatch stopped making progress. Remaining passes stay Pending/Failed; you can send them again.');
+        // Hand the batch to the background driver (shown in the blue panel) instead of abandoning it
+        dispatchProgressBatchIdRef.current = null;
+        setDispatchProgress(null);
+        alert(
+          'Lost contact with the sender for a while. The batch is saved and keeps sending in the background ' +
+            'while this Passes tab is open (see the blue progress panel).'
+        );
       }
       void fetchSenderQuota();
 
@@ -440,7 +491,64 @@ export default function Home() {
       console.error('Email dispatch error:', err);
       alert(`Error starting email dispatch: ${err instanceof Error ? err.message : String(err)}`);
     } finally {
+      dispatchProgressBatchIdRef.current = null;
       setEmailSending(false);
+    }
+  };
+
+  // Fix a pass holder's email (e.g. it bounced) and resend the pass to the corrected address
+  const handleEditEmailAndResend = async (rec: EventRecord) => {
+    const reason = rec.email_error ? `\n\nLast problem: ${rec.email_error}` : '';
+    const entered = window.prompt(
+      `Correct email for ${rec.name || 'attendee'} (${rec.order_id}).\nThe pass will be resent to this address.${reason}`,
+      rec.email || ''
+    );
+    if (entered === null || !entered.trim()) return;
+    try {
+      const res = await fetch('/api/records/email', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ orderId: rec.order_id, email: entered }),
+      });
+      const data = await res.json();
+      if (!data.success) {
+        alert(data.error || 'Failed to update email');
+        return;
+      }
+      const ev = rec.event_id === 'navratri_utsav' ? 'navratri_utsav' : 'garba_groove';
+      await handleSendEmails([rec.order_id], false, ev);
+      void fetchManualPasses();
+    } catch (err) {
+      alert(`Failed to update email: ${err instanceof Error ? err.message : String(err)}`);
+    }
+  };
+
+  // Create a manual pass (server assigns a random SC######## code), then email it straight away
+  const handleCreateManualPass = async (e: React.FormEvent) => {
+    e.preventDefault();
+    setManualError(null);
+    setManualSubmitting(true);
+    try {
+      const res = await fetch('/api/passes/manual', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(manualForm),
+      });
+      const data = await res.json();
+      if (!data.success) {
+        setManualError(data.error || 'Failed to create pass');
+        return;
+      }
+      const record: EventRecord = data.record;
+      setManualLastCreated(record);
+      setManualForm((prev) => ({ ...prev, name: '', email: '', phone: '', quantity: '1', amount: '' }));
+      void fetchManualPasses();
+      await handleSendEmails([record.order_id], false, record.event_id as 'garba_groove' | 'navratri_utsav');
+      void fetchManualPasses();
+    } catch (err) {
+      setManualError(err instanceof Error ? err.message : String(err));
+    } finally {
+      setManualSubmitting(false);
     }
   };
 
@@ -652,38 +760,93 @@ export default function Home() {
   }, [isAuthenticated, selectedEvent, refreshAll]);
 
   useEffect(() => {
+    if (isAuthenticated && activeTab === 'manual') {
+      void fetchManualPasses();
+      void fetchSenderQuota();
+    }
     if (isAuthenticated && activeTab === 'passes') {
       void fetchSenderQuota();
     }
-  }, [isAuthenticated, activeTab, fetchSenderQuota]);
+  }, [isAuthenticated, activeTab, fetchSenderQuota, fetchManualPasses]);
 
-  // Show progress of any batch still sending, wherever it was started; refresh the list when one finishes
+  // Keep every unfinished batch sending while a Passes tab is open, wherever it was started. Sending only
+  // advances when something polls /api/email/status, so a reload or dropped connection used to stall a batch
+  // until someone polled it again. Polls run one at a time (no stacking); several tabs are safe because worker
+  // steps are serialized and each job is claimed atomically.
   useEffect(() => {
     if (!isAuthenticated || activeTab !== 'passes') return;
     let cancelled = false;
     let previousIds = new Set<string>();
-    const load = async () => {
-      try {
-        const res = await fetch('/api/email/active');
-        const data = await res.json();
-        if (cancelled || !data.success) return;
-        const batches: EmailBatch[] = data.batches || [];
-        setActiveBatches(batches);
-        const currentIds = new Set(batches.map((b) => b.batch_id));
-        if ([...previousIds].some((id) => !currentIds.has(id))) {
-          void fetchPasses(passSearch, passDivisionFilter, selectedEvent, selectedDateFilter, selectedHourFilter);
-          void fetchSenderQuota();
+
+    const tick = async (): Promise<boolean> => {
+      const res = await fetch('/api/email/active');
+      const data = await res.json();
+      if (cancelled || !data.success) return false;
+      const batches: EmailBatch[] = data.batches || [];
+
+      // Drive batches this tab isn't already driving through handleSendEmails' own loop
+      const ownBatchId = dispatchProgressBatchIdRef.current;
+      const refreshed: EmailBatch[] = [];
+      for (const b of batches) {
+        if (cancelled) return false;
+        if (b.batch_id === ownBatchId) {
+          refreshed.push(b);
+          continue;
         }
-        previousIds = currentIds;
-      } catch (err) {
-        console.warn('Failed to load active email batches:', err);
+        try {
+          const statusRes = await fetch(`/api/email/status?batchId=${encodeURIComponent(b.batch_id)}`);
+          const s = await statusRes.json();
+          refreshed.push(
+            s.success
+              ? { ...b, total: s.total, queued: s.queued, processing: s.processing, sent: s.sent, retrying: s.retrying, failed: s.failed, completed_at: s.completed ? s.completedAt || new Date().toISOString() : null }
+              : b
+          );
+        } catch {
+          refreshed.push(b);
+        }
       }
+
+      const stillActive = refreshed.filter((b) => !b.completed_at);
+      const now = Date.now();
+      const rates: Record<string, number | null> = {};
+      for (const b of stillActive) {
+        // Speed over the last 3 minutes, so an earlier pause (lost connection, sleeping laptop) doesn't skew
+        // the ETA; needs ~20s of samples before estimating
+        const samples = (batchProgressSamplesRef.current[b.batch_id] || []).filter((p) => now - p.at <= 3 * 60 * 1000);
+        samples.push({ at: now, done: b.sent + b.failed });
+        batchProgressSamplesRef.current[b.batch_id] = samples;
+        const windowMs = now - samples[0].at;
+        const windowDone = b.sent + b.failed - samples[0].done;
+        rates[b.batch_id] = windowMs >= 20000 && windowDone > 0 ? windowDone / windowMs : null;
+      }
+      if (cancelled) return false;
+      setActiveBatches(stillActive);
+      setBatchRates(rates);
+
+      const currentIds = new Set(stillActive.map((b) => b.batch_id));
+      if ([...previousIds].some((id) => !currentIds.has(id))) {
+        void fetchPasses(passSearch, passDivisionFilter, selectedEvent, selectedDateFilter, selectedHourFilter);
+        void fetchSenderQuota();
+      }
+      previousIds = currentIds;
+      return stillActive.some((b) => b.batch_id !== ownBatchId);
     };
-    void load();
-    const timer = setInterval(load, 5000);
+
+    void (async () => {
+      while (!cancelled) {
+        let drove = false;
+        try {
+          drove = await tick();
+        } catch (err) {
+          console.warn('Failed to drive active email batches:', err);
+        }
+        // Keep driving briskly while there is work; otherwise just check occasionally
+        await new Promise((resolve) => setTimeout(resolve, drove ? 1500 : 5000));
+      }
+    })();
+
     return () => {
       cancelled = true;
-      clearInterval(timer);
     };
   }, [isAuthenticated, activeTab, fetchSenderQuota, fetchPasses, passSearch, passDivisionFilter, selectedEvent, selectedDateFilter, selectedHourFilter]);
 
@@ -1372,6 +1535,16 @@ export default function Home() {
               </span>
             )}
           </button>
+          <button
+            onClick={() => setActiveTab('manual')}
+            className={`px-3.5 py-2 rounded-lg text-xs font-semibold flex items-center gap-2 transition shrink-0 ${
+              activeTab === 'manual'
+                ? 'bg-slate-800 text-amber-400 border border-slate-700 font-bold'
+                : 'text-slate-400 hover:text-slate-200 hover:bg-slate-900'
+            }`}
+          >
+            <Send className="w-4 h-4" /> Manual Passes
+          </button>
           <a
             href="/verify"
             target="_blank"
@@ -1895,6 +2068,14 @@ export default function Home() {
                     }`}
                   >
                     <Users className="w-3.5 h-3.5" /> L1 Volunteers
+                  </button>
+                  <button
+                    onClick={() => setDivisionViewMode('mentors')}
+                    className={`px-3 py-1.5 rounded-lg font-semibold flex items-center gap-1.5 transition ${
+                      divisionViewMode === 'mentors' ? 'bg-amber-500 text-slate-950 font-bold' : 'text-slate-400'
+                    }`}
+                  >
+                    <GraduationCap className="w-3.5 h-3.5" /> Mentors
                   </button>
                   <button
                     onClick={() => setDivisionViewMode('daywise_timeline')}
@@ -2495,6 +2676,105 @@ export default function Home() {
             })()}
 
             {/* VIEW MODE 3: DAY-WISE CHRONOLOGICAL TIMELINE TABLE */}
+            {/* VIEW MODE: MENTOR-WISE AMOUNT RAISED */}
+            {divisionViewMode === 'mentors' && (() => {
+              // Per-day division figures (so GNITS splits by date), following the date and hour filters
+              const mentorDays = (activeDayStat ? [activeDayStat] : stats?.dayWiseStats || []).map((day) => ({
+                date: day.date,
+                divisionStats:
+                  selectedHourFilter !== 'all'
+                    ? day.hourlyStats?.[Number(selectedHourFilter)]?.divisionStats || []
+                    : day.divisionStats,
+              }));
+              const mentorStats = computeMentorStats(mentorDays);
+              const grandTotal = mentorStats.reduce((sum, m) => sum + m.revenue, 0);
+              const inr = (n: number) => `₹${n.toLocaleString('en-IN', { maximumFractionDigits: 2 })}`;
+
+              return (
+                <div className="space-y-5">
+                  <div className="bg-slate-900/90 border border-emerald-500/30 p-5 rounded-2xl flex flex-col md:flex-row md:items-center justify-between gap-3">
+                    <div>
+                      <div className="text-xs text-slate-400 uppercase tracking-wider font-semibold">
+                        Total raised across mentors
+                        {selectedDateFilter !== 'all' || selectedHourFilter !== 'all' ? ' (filtered)' : ''}
+                      </div>
+                      <div className="text-3xl font-extrabold text-emerald-400 mt-1">{inr(grandTotal)}</div>
+                    </div>
+                    <div className="text-[11px] text-slate-500 max-w-md">
+                      Pass sales + donations by division, grouped by mentor. GNITS is split by sale date: Tejasri up to 5 Oct,
+                      Dilip from 6 Oct.
+                    </div>
+                  </div>
+
+                  {mentorStats.length === 0 ? (
+                    <div className="bg-slate-900/90 border border-slate-800 p-8 rounded-2xl text-center text-sm text-slate-400">
+                      No sales in this selection.
+                    </div>
+                  ) : (
+                    <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-4">
+                      {mentorStats.map((m, idx) => {
+                        const unassigned = m.mentor === UNASSIGNED_MENTOR;
+                        const share = grandTotal > 0 ? Math.round((m.revenue / grandTotal) * 1000) / 10 : 0;
+                        return (
+                          <div
+                            key={m.mentor}
+                            className={`bg-slate-900/90 border rounded-2xl p-5 shadow-lg ${
+                              unassigned ? 'border-slate-700 opacity-80' : 'border-slate-800 hover:border-emerald-500/40'
+                            }`}
+                          >
+                            <div className="flex items-start justify-between">
+                              <div>
+                                <div className="text-[11px] font-bold text-amber-400 uppercase tracking-wider">
+                                  {unassigned ? 'No mentor mapped' : `Rank #${idx + 1}`}
+                                </div>
+                                <div className="text-lg font-extrabold text-white">{m.mentor}</div>
+                              </div>
+                              <div className="w-9 h-9 rounded-xl bg-emerald-500/10 text-emerald-400 flex items-center justify-center">
+                                <GraduationCap className="w-5 h-5" />
+                              </div>
+                            </div>
+
+                            <div className="mt-3 bg-emerald-500/10 border border-emerald-500/30 rounded-xl px-4 py-3 flex items-center justify-between">
+                              <span className="text-xs text-emerald-300 font-semibold">Total raised</span>
+                              <span className="text-xl font-extrabold text-emerald-400">{inr(m.revenue)}</span>
+                            </div>
+                            <div className="text-[10px] text-slate-500 mt-1 text-right">{share}% of total</div>
+
+                            <div className="grid grid-cols-2 gap-2 mt-2">
+                              <div className="bg-slate-950 border border-slate-800 rounded-xl px-3 py-2">
+                                <div className="text-[10px] text-slate-400">Passes sold</div>
+                                <div className="text-base font-bold text-amber-400">{m.passes.toLocaleString('en-IN')}</div>
+                                <div className="text-[10px] text-slate-500">
+                                  {m.passTransactions} txns • {inr(m.passAmount)}
+                                </div>
+                              </div>
+                              <div className="bg-slate-950 border border-slate-800 rounded-xl px-3 py-2">
+                                <div className="text-[10px] text-slate-400">Donations</div>
+                                <div className="text-base font-bold text-rose-400">{inr(m.donationAmount)}</div>
+                                <div className="text-[10px] text-slate-500">{m.donationTransactions} donations</div>
+                              </div>
+                            </div>
+
+                            <div className="mt-3 space-y-1">
+                              <div className="text-[10px] text-slate-500 uppercase tracking-wider">By division</div>
+                              {m.divisions.map((d) => (
+                                <div key={d.label} className="flex items-center justify-between text-xs bg-slate-950/60 rounded-lg px-2.5 py-1.5">
+                                  <span className="text-slate-200 font-semibold">{d.label}</span>
+                                  <span className="text-slate-400">
+                                    {d.passes} passes • <span className="text-emerald-400 font-semibold">{inr(d.revenue)}</span>
+                                  </span>
+                                </div>
+                              ))}
+                            </div>
+                          </div>
+                        );
+                      })}
+                    </div>
+                  )}
+                </div>
+              );
+            })()}
+
             {divisionViewMode === 'daywise_timeline' && (
               <div className="bg-slate-900/90 border border-slate-800 rounded-2xl overflow-hidden">
                 <div className="p-4 border-b border-slate-800 flex items-center justify-between">
@@ -3091,11 +3371,11 @@ export default function Home() {
                   .map((b) => {
                     const done = b.sent + b.failed;
                     const pct = Math.min(100, Math.round((done / Math.max(1, b.total)) * 100));
-                    // ETA from the batch's average rate since it started (steadier than the last few polls)
-                    const elapsedMs = Date.now() - new Date(b.created_at).getTime();
+                    // ETA from the recent sending speed measured by the background driver
                     const remaining = Math.max(0, b.total - done);
-                    const etaMs = done > 0 && elapsedMs > 0 ? (remaining * elapsedMs) / done : null;
-                    const perMinute = done > 0 && elapsedMs > 0 ? Math.round(done / (elapsedMs / 60000)) : null;
+                    const ratePerMs = batchRates[b.batch_id] ?? null;
+                    const etaMs = ratePerMs ? remaining / ratePerMs : null;
+                    const perMinute = ratePerMs ? Math.round(ratePerMs * 60000) : null;
                     const etaLabel =
                       etaMs === null
                         ? 'Estimating time…'
@@ -3108,7 +3388,13 @@ export default function Home() {
                           <div className="flex items-center gap-2 text-sky-300">
                             <RefreshCw className="w-3.5 h-3.5 animate-spin text-sky-400" />
                             <span>
-                              Sending {b.event_id === 'navratri_utsav' ? 'Navratri Utsav' : 'Garba Groove'} passes (
+                              Sending{' '}
+                              {b.event_id === 'navratri_utsav'
+                                ? 'Navratri Utsav'
+                                : b.event_id === 'garba_groove'
+                                ? 'Garba Groove'
+                                : 'All events'}{' '}
+                              passes (
                               {b.batch_id})
                             </span>
                           </div>
@@ -3383,6 +3669,18 @@ export default function Home() {
                                 >
                                   <Mail className="w-3.5 h-3.5" />
                                 </button>
+                                <button
+                                  onClick={() => handleEditEmailAndResend(rec)}
+                                  disabled={emailSending}
+                                  className={`p-1.5 rounded-lg bg-slate-800 hover:bg-slate-700 border transition disabled:opacity-50 ${
+                                    status === 'Failed'
+                                      ? 'text-rose-300 border-rose-500/40 hover:text-rose-200'
+                                      : 'text-slate-300 border-slate-700 hover:text-sky-300'
+                                  }`}
+                                  title="Correct email & resend pass"
+                                >
+                                  <PencilLine className="w-3.5 h-3.5" />
+                                </button>
                               </div>
                             </td>
                           </tr>
@@ -3512,6 +3810,219 @@ export default function Home() {
         })()}
 
         {/* 5. DONATION RECORDS TAB */}
+        {/* TAB: MANUAL PASSES (admin-entered, random SC######## codes) */}
+        {activeTab === 'manual' && (
+          <div className="space-y-6 animate-in fade-in duration-300">
+            <div className="bg-slate-900/90 border border-slate-800 rounded-2xl p-6 shadow-xl">
+              <div className="flex flex-wrap items-start justify-between gap-3 mb-5">
+                <div>
+                  <h2 className="text-lg font-bold text-white flex items-center gap-2">
+                    <Send className="w-5 h-5 text-amber-400" /> Create &amp; Send a Pass
+                  </h2>
+                  <p className="text-xs text-slate-400 mt-1">
+                    For passes sold offline or given to guests. Each pass gets its own random code (e.g. SC7KQ4M9XP)
+                    that is printed and encoded in the QR, and is emailed straight away.
+                  </p>
+                </div>
+                {senderQuota && (
+                  <span className="text-[11px] px-2.5 py-1 rounded-lg border border-slate-700 text-slate-300 bg-slate-900">
+                    📮 {senderQuota.totalRemaining} sends left today
+                  </span>
+                )}
+              </div>
+
+              <form onSubmit={handleCreateManualPass} className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                <div className="md:col-span-2">
+                  <label className="text-xs font-semibold text-slate-400 block mb-1.5">Event</label>
+                  <div className="flex gap-2">
+                    {(['garba_groove', 'navratri_utsav'] as const).map((ev) => (
+                      <button
+                        key={ev}
+                        type="button"
+                        onClick={() => setManualForm((f) => ({ ...f, eventId: ev }))}
+                        className={`px-4 py-2 rounded-xl text-sm font-bold border transition ${
+                          manualForm.eventId === ev
+                            ? ev === 'garba_groove'
+                              ? 'bg-amber-500 text-slate-950 border-amber-500'
+                              : 'bg-purple-600 text-white border-purple-600'
+                            : 'bg-slate-950 text-slate-300 border-slate-800 hover:border-slate-600'
+                        }`}
+                      >
+                        {ev === 'garba_groove' ? '🌟 Garba Groove (10 Oct)' : '🪔 Navratri Utsav (11 Oct)'}
+                      </button>
+                    ))}
+                  </div>
+                </div>
+
+                {([
+                  { key: 'name', label: 'Name', type: 'text', placeholder: 'Attendee full name', required: true },
+                  { key: 'email', label: 'Email ID', type: 'email', placeholder: 'name@gmail.com', required: true },
+                  { key: 'phone', label: 'Mobile number', type: 'tel', placeholder: '9876543210', required: true },
+                  { key: 'quantity', label: 'Number of passes', type: 'number', placeholder: '1', required: true },
+                  { key: 'amount', label: 'Amount paid (₹, optional)', type: 'number', placeholder: 'Leave blank if not applicable', required: false },
+                ] as const).map((field) => (
+                  <div key={field.key}>
+                    <label className="text-xs font-semibold text-slate-400 block mb-1.5">{field.label}</label>
+                    <input
+                      type={field.type}
+                      required={field.required}
+                      min={field.key === 'quantity' ? 1 : field.key === 'amount' ? 0 : undefined}
+                      max={field.key === 'quantity' ? 50 : undefined}
+                      step={field.key === 'quantity' ? 1 : undefined}
+                      value={manualForm[field.key]}
+                      placeholder={field.placeholder}
+                      onChange={(e) => setManualForm((f) => ({ ...f, [field.key]: e.target.value }))}
+                      className="w-full px-3.5 py-2.5 rounded-xl bg-slate-950 border border-slate-800 text-sm text-slate-100 placeholder-slate-600 focus:outline-none focus:border-amber-500"
+                    />
+                  </div>
+                ))}
+
+                <div className="md:col-span-2 flex flex-wrap items-center gap-3">
+                  <button
+                    type="submit"
+                    disabled={manualSubmitting || emailSending}
+                    className="px-5 py-2.5 rounded-xl text-sm font-bold bg-gradient-to-r from-amber-500 to-orange-500 hover:from-amber-400 hover:to-orange-400 text-slate-950 flex items-center gap-2 shadow-lg disabled:opacity-50"
+                  >
+                    {manualSubmitting ? <RefreshCw className="w-4 h-4 animate-spin" /> : <Send className="w-4 h-4" />}
+                    {manualSubmitting ? 'Creating & sending…' : 'Generate & Send Pass'}
+                  </button>
+                  {manualError && <span className="text-xs text-rose-400 font-semibold">{manualError}</span>}
+                </div>
+              </form>
+
+              {manualLastCreated && (
+                <div className="mt-5 p-4 rounded-xl bg-slate-950 border border-emerald-500/30">
+                  <div className="flex flex-wrap items-center justify-between gap-2">
+                    <div className="text-sm text-slate-200">
+                      Pass <span className="font-mono font-extrabold text-amber-400">{manualLastCreated.order_id}</span> for{' '}
+                      <span className="font-bold">{manualLastCreated.name}</span> ({manualLastCreated.item_quantity}{' '}
+                      {manualLastCreated.item_quantity === 1 ? 'pass' : 'passes'},{' '}
+                      {manualLastCreated.event_id === 'navratri_utsav' ? 'Navratri Utsav' : 'Garba Groove'}) → {manualLastCreated.email}
+                    </div>
+                    <span className="text-xs font-bold">
+                      {dispatchProgress?.batchId && emailSending ? (
+                        <span className="text-amber-300 flex items-center gap-1.5">
+                          <RefreshCw className="w-3.5 h-3.5 animate-spin" /> Sending…
+                        </span>
+                      ) : manualPasses.find((p) => p.order_id === manualLastCreated.order_id)?.email_status === 'Sent' ? (
+                        <span className="text-emerald-400">✅ Email sent</span>
+                      ) : manualPasses.find((p) => p.order_id === manualLastCreated.order_id)?.email_status === 'Failed' ? (
+                        <span className="text-rose-400">❌ Email failed (use Resend below)</span>
+                      ) : (
+                        <span className="text-slate-400">Saved</span>
+                      )}
+                    </span>
+                  </div>
+                </div>
+              )}
+            </div>
+
+            {/* Manual passes list */}
+            <div className="bg-slate-900/90 border border-slate-800 rounded-2xl overflow-hidden shadow-xl">
+              <div className="px-5 py-4 border-b border-slate-800 flex items-center justify-between">
+                <h3 className="text-sm font-bold text-white">Manual passes ({manualPasses.length})</h3>
+                <button
+                  onClick={() => void fetchManualPasses()}
+                  className="p-1.5 rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-300 border border-slate-700"
+                  title="Refresh"
+                >
+                  <RefreshCw className="w-3.5 h-3.5" />
+                </button>
+              </div>
+              <div className="overflow-x-auto">
+                <table className="w-full text-left text-xs">
+                  <thead className="bg-slate-950/80 text-slate-400 uppercase text-[10px] tracking-wider border-b border-slate-800">
+                    <tr>
+                      <th className="py-3 px-4">Code</th>
+                      <th className="py-3 px-4">Event</th>
+                      <th className="py-3 px-4">Name</th>
+                      <th className="py-3 px-4">Email</th>
+                      <th className="py-3 px-4">Mobile</th>
+                      <th className="py-3 px-4 text-center">Passes</th>
+                      <th className="py-3 px-4">Amount</th>
+                      <th className="py-3 px-4">Email Status</th>
+                      <th className="py-3 px-4 text-right">Actions</th>
+                    </tr>
+                  </thead>
+                  <tbody className="divide-y divide-slate-800/60">
+                    {manualPasses.length === 0 ? (
+                      <tr>
+                        <td colSpan={9} className="py-8 text-center text-slate-500">
+                          No manual passes yet.
+                        </td>
+                      </tr>
+                    ) : (
+                      manualPasses.map((p) => {
+                        const ev = p.event_id === 'navratri_utsav' ? 'navratri_utsav' : 'garba_groove';
+                        return (
+                          <tr key={`${ev}-${p.order_id}`} className="hover:bg-slate-800/30">
+                            <td className="py-3 px-4 font-mono font-bold text-amber-400">{p.order_id}</td>
+                            <td className="py-3 px-4 text-slate-300">{ev === 'navratri_utsav' ? 'Navratri Utsav' : 'Garba Groove'}</td>
+                            <td className="py-3 px-4 text-slate-200 font-semibold">{p.name}</td>
+                            <td className="py-3 px-4 text-slate-300">{p.email}</td>
+                            <td className="py-3 px-4 text-slate-300">{p.phone}</td>
+                            <td className="py-3 px-4 text-center text-slate-200 font-bold">{p.item_quantity}</td>
+                            <td className="py-3 px-4 text-slate-300">
+                              {Number(p.item_payment_amount) ? `₹${Number(p.item_payment_amount).toLocaleString('en-IN')}` : '—'}
+                            </td>
+                            <td className="py-3 px-4">
+                              <span
+                                className={`px-2 py-0.5 rounded-full text-[11px] font-semibold border ${
+                                  p.email_status === 'Sent'
+                                    ? 'bg-emerald-500/15 text-emerald-400 border-emerald-500/30'
+                                    : p.email_status === 'Failed'
+                                    ? 'bg-rose-500/15 text-rose-400 border-rose-500/30'
+                                    : 'bg-slate-800 text-slate-400 border-slate-700'
+                                }`}
+                                title={p.email_error || undefined}
+                              >
+                                {p.email_status || 'Pending'}
+                              </span>
+                              {p.email_sent_from && (
+                                <div className="text-[10px] text-slate-500 font-mono mt-1">via {p.email_sent_from}</div>
+                              )}
+                            </td>
+                            <td className="py-3 px-4 text-right">
+                              <div className="inline-flex items-center gap-1.5">
+                                <button
+                                  onClick={() => handleOpenEmailPreview(p.order_id, ev)}
+                                  className="p-1.5 rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-300 border border-slate-700 hover:text-amber-300"
+                                  title="Preview pass"
+                                >
+                                  <Eye className="w-3.5 h-3.5" />
+                                </button>
+                                <button
+                                  onClick={async () => {
+                                    await handleSendEmails([p.order_id], p.email_status === 'Sent', ev);
+                                    void fetchManualPasses();
+                                  }}
+                                  disabled={emailSending}
+                                  className="p-1.5 rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-300 border border-slate-700 hover:text-emerald-300 disabled:opacity-50"
+                                  title={p.email_status === 'Sent' ? 'Resend pass email' : 'Send pass email'}
+                                >
+                                  <Mail className="w-3.5 h-3.5" />
+                                </button>
+                                <button
+                                  onClick={() => handleEditEmailAndResend(p)}
+                                  disabled={emailSending}
+                                  className="p-1.5 rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-300 border border-slate-700 hover:text-sky-300 disabled:opacity-50"
+                                  title="Correct email & resend pass"
+                                >
+                                  <PencilLine className="w-3.5 h-3.5" />
+                                </button>
+                              </div>
+                            </td>
+                          </tr>
+                        );
+                      })
+                    )}
+                  </tbody>
+                </table>
+              </div>
+            </div>
+          </div>
+        )}
+
         {activeTab === 'donations' && (
           <div className="space-y-4">
             <div className="flex flex-col lg:flex-row lg:items-center justify-between gap-4 bg-slate-900/90 border border-slate-800 p-4 rounded-2xl">
